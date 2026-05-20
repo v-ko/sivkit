@@ -272,7 +272,6 @@ export class HashTree {
         }
     }
     removeNode(node: HashTreeNode) {
-        log.info('Marking node for removal', node.entityId)
         node.markAsRemoved();
         this.cleanUpRemovedNodesLater();
     }
@@ -282,7 +281,7 @@ export class HashTree {
 
     deleteNodesMarkedForRemoval() {
         /** Remove nodes marked for removal */
-        log.info('Cleaning up hash tree')
+        // log.info('Cleaning up hash tree')
         // Remove nodes marked for removal. First detach from parents, then delete
         let forDeletion: HashTreeNode[] = [];
         for (let node of Object.values(this.nodes)) {
@@ -366,32 +365,41 @@ export async function buildHashTree(store: Store): Promise<HashTree> {
     let t0 = performance.now();
     let tree: HashTree = new HashTree();
 
-    // Collect all entities reachable from roots, batch-hash in parallel
-    let rootEntities = Array.from(store.find({ parentId: '' }));
-
-    // Gather all children for each root (only one level of nesting in practice)
-    let allEntities: any[] = [...rootEntities];
-    for (let root of rootEntities) {
-        let children = Array.from(store.find({ parentId: root.id }));
-        allEntities.push(...children);
-    }
+    // Collect all entities, partition into roots and children
+    let allEntities = Array.from(store.find({}));
+    let rootEntities = allEntities.filter(e => e.parentId === '');
+    let childEntities = allEntities.filter(e => e.parentId !== '');
 
     // Batch-compute all entity data hashes in parallel
     const dataStrings = allEntities.map(e => getEntityDataString(e));
     const entityHashes = await Promise.all(dataStrings.map(d => hash(d)));
 
-    // Insert roots first so children find their parents
     let hashByEntityId: { [id: string]: string } = {};
     for (let i = 0; i < allEntities.length; i++) {
         hashByEntityId[allEntities[i].id] = entityHashes[i];
     }
+
     // Insert roots first so children find their parent in the tree
     for (let root of rootEntities) {
         tree.createNode(root.id, '', hashByEntityId[root.id]);
     }
-    for (let i = rootEntities.length; i < allEntities.length; i++) {
-        const entity = allEntities[i];
-        tree.createNode(entity.id, entity.parentId, hashByEntityId[entity.id]);
+    // Insert children in topological order (parents before their children)
+    let remaining = [...childEntities];
+    let prevLength = remaining.length + 1;
+    while (remaining.length > 0 && remaining.length < prevLength) {
+        prevLength = remaining.length;
+        let deferred: typeof remaining = [];
+        for (let entity of remaining) {
+            if (tree.nodes[entity.parentId]) {
+                tree.createNode(entity.id, entity.parentId, hashByEntityId[entity.id]);
+            } else {
+                deferred.push(entity);
+            }
+        }
+        remaining = deferred;
+    }
+    if (remaining.length > 0) {
+        log.warning(`${remaining.length} entities have missing parents and were not added to hash tree`);
     }
 
     await tree.updateRootHash();
@@ -424,6 +432,23 @@ export async function updateHashTree(tree: HashTree, store: Store, delta: Delta)
             }
             const data = getEntityDataString(entity);
             node.entityDataHash = await hash(data);
+
+            // Handle reparenting: if parent_id changed, move the node
+            if (node.parentId !== entity.parentId) {
+                let oldParent = tree.nodes[node.parentId];
+                if (oldParent) {
+                    oldParent.removeChild(node);
+                }
+                let newParent = tree.nodes[entity.parentId];
+                if (!newParent) {
+                    throw Error(
+                        `New parent '${entity.parentId}' not found for ` +
+                        `reparented entity ${change.entityId}`
+                    );
+                }
+                node.parentId = entity.parentId;
+                newParent.addChild(node);
+            }
             node.setHashOutdated();
 
         } else if (changeType === ChangeType.CREATE) {
@@ -439,5 +464,5 @@ export async function updateHashTree(tree: HashTree, store: Store, delta: Delta)
     }
     await tree.updateRootHash();
     let t1 = performance.now();
-    log.info(`Hash tree updated in ${t1 - t0} ms`);
+    // log.info(`Hash tree updated in ${t1 - t0} ms`);
 }

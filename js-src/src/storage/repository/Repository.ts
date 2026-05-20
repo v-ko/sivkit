@@ -262,6 +262,9 @@ export class Repository {
         if (!this._isCaching) {
             throw new Error("Cannot create a commit without head state caching enabled");
         }
+        if (delta.isEmpty()) {
+            throw new Error("Cannot commit an empty delta");
+        }
 
         log.info('Committing', delta, message)
         // Apply to the head store

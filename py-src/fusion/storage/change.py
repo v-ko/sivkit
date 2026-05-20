@@ -8,6 +8,11 @@ from fusion.libs.model import Entity, dump_to_dict
 
 log = get_logger(__name__)
 
+# Wire format: [entity_id, reverse_component, forward_component]
+# Kept as list (not tuple) for consistency with JSON deserialization output.
+# Can't type precisely as list[str, dict, dict] in Python.
+ChangeData = list  # [str, dict[str, Any], dict[str, Any]]
+
 
 class ChangeTypes(Enum):
     EMPTY = 0
@@ -36,9 +41,9 @@ class Change:
         self.reverse_component = reverse_component
         self.forward_component = forward_component
 
-    def asdict(self) -> tuple[str, dict[str, Any], dict[str, Any]]:
-        """Serialize to the wire format: (entity_id, reverse, forward)."""
-        return (self.entity_id, self.reverse_component, self.forward_component)
+    def asdict(self) -> ChangeData:
+        """Serialize to the wire format: [entity_id, reverse, forward]."""
+        return [self.entity_id, self.reverse_component, self.forward_component]
 
     def type(self) -> ChangeTypes:
         has_reverse = len(self.reverse_component) > 0

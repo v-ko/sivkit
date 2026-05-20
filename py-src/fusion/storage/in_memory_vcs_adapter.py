@@ -16,7 +16,9 @@ class InMemoryVcsAdapter(VcsAdapter):
     def get_commit_graph(self) -> CommitGraph:
         return CommitGraph.from_data(self._commit_graph.data())
 
-    def get_commits(self, ids: list[str]) -> list[Commit]:
+    def get_commits(self, ids: list[str] | None = None) -> list[Commit]:
+        if ids is None:
+            return list(self._commit_by_id.values())
         result: list[Commit] = []
         for commit_id in ids:
             commit = self._commit_by_id.get(commit_id)

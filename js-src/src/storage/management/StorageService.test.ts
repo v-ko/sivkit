@@ -211,7 +211,7 @@ describe("StorageService base functionality", () => {
             type: 'commit',
             commit: expect.objectContaining({
                 message: 'Test commit',
-                deltaData: delta.data,
+                delta_data: delta.data,
             }),
         });
 

@@ -240,4 +240,39 @@ describe("HashTree", () => {
         await emptyTree.updateRootHash();
         expect(tree.rootHash()).toEqual(emptyTree.rootHash());
     });
+
+    test("updateHashTree handles reparenting (parent_id change in UPDATE)", async () => {
+        let store = new InMemoryStore();
+
+        // Create two pages and a note under page1
+        let page1 = new DummyPage({ id: 'p1', parent_id: '', name: 'Page1' });
+        let page2 = new DummyPage({ id: 'p2', parent_id: '', name: 'Page2' });
+        let note = new DummyNote({ id: 'n1', parent_id: 'p1', testProp: 'hello' });
+
+        let createChanges = [
+            store.insertOne(page1),
+            store.insertOne(page2),
+            store.insertOne(note),
+        ];
+        let tree = new HashTree();
+        await updateHashTree(tree, store, Delta.fromChanges(createChanges));
+
+        // Move note from page1 to page2 via an UPDATE that changes parent_id
+        let noteOld = store.findOne({ id: 'n1' })! as DummyNote;
+        let noteNew = new DummyNote({ id: 'n1', parent_id: 'p2', testProp: 'hello' });
+        let updateChange = Change.update(noteOld, noteNew);
+        store.updateOne(noteNew);
+        let updateDelta = Delta.fromChanges([updateChange]);
+        await updateHashTree(tree, store, updateDelta);
+
+        // Incremental result must match a fresh build from the same store
+        let rebuilt = await buildHashTree(store);
+        expect(tree.rootHash()).toEqual(rebuilt.rootHash());
+
+        // Verify the node is actually under p2 now
+        let p2Node = tree.nodes['p2'];
+        expect(p2Node.children['n1']).toBeDefined();
+        let p1Node = tree.nodes['p1'];
+        expect(p1Node.children['n1']).toBeUndefined();
+    });
 });

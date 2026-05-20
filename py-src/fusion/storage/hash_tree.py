@@ -230,7 +230,6 @@ class HashTree:
                 self.insert_node(child)
 
     def remove_node(self, node: HashTreeNode) -> None:
-        log.info("Marking node for removal: %s", node.entity_id)
         node.mark_as_removed()
         self.clean_up_removed_nodes_later()
 
@@ -337,6 +336,21 @@ def update_hash_tree(tree: HashTree, store: Store, delta: Delta) -> None:
                 raise ValueError(f"Entity not found for change {change.entity_id}")
             data_string = _get_entity_data_string(entity)
             node.entity_data_hash = _hash(data_string)
+
+            # Handle reparenting: if parent_id changed, move the node
+            if node.parent_id != entity.parent_id:
+                old_parent = tree.nodes.get(node.parent_id)
+                if old_parent is not None:
+                    old_parent.remove_child(node)
+                new_parent = tree.nodes.get(entity.parent_id)
+                if new_parent is None:
+                    raise ValueError(
+                        f"New parent {entity.parent_id!r} not found for "
+                        f"reparented entity {change.entity_id}"
+                    )
+                node.parent_id = entity.parent_id
+                new_parent.add_child(node)
+
             node.set_hash_outdated()
 
         elif change_type == ChangeTypes.CREATE:

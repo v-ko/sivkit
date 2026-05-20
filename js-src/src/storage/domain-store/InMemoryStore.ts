@@ -197,27 +197,13 @@ class IndexManager {
         }
     }
 
-    updateEntity(oldEntity: Entity<EntityData>, newEntity: Entity<EntityData>, changedFields?: Set<string>): void {
-        if (!changedFields) {
-            // Fallback to full update if no change info provided
-            this.removeEntity(oldEntity);
-            this.addEntity(newEntity);
-            return;
-        }
-
-        // Only update indexes that are affected by changed fields
+    updateEntity(oldEntity: Entity<EntityData>, newEntity: Entity<EntityData>): void {
         for (const [indexName, config] of this.resolvedIndexConfigs) {
-            const isIndexAffected = config.fields.some(field => {
-                if (isEntityTypeIndexConfig(field)) {
-                    // Type changes are rare but possible, check constructor names
-                    return oldEntity.constructor.name !== newEntity.constructor.name;
-                }
-                return changedFields.has(field.indexKey);
-            });
+            const oldIndexKey = generateIndexKey(oldEntity, config);
+            const newIndexKey = generateIndexKey(newEntity, config);
 
-            if (isIndexAffected) {
-                // Remove from old index position
-                const oldIndexKey = generateIndexKey(oldEntity, config);
+            if (oldIndexKey !== newIndexKey) {
+                // Index key changed — remove from old position, add to new
                 if (oldIndexKey !== null) {
                     const index = this.indexes.get(indexName)!;
 
@@ -237,8 +223,6 @@ class IndexManager {
                     }
                 }
 
-                // Add to new index position
-                const newIndexKey = generateIndexKey(newEntity, config);
                 if (newIndexKey !== null) {
                     const index = this.indexes.get(indexName)!;
 
@@ -253,21 +237,18 @@ class IndexManager {
                         }
                     }
                 }
-            } else {
-                // Index not affected, just update the entity reference in place
-                const indexKey = generateIndexKey(oldEntity, config);
-                if (indexKey !== null) {
-                    const index = this.indexes.get(indexName)!;
+            } else if (oldIndexKey !== null) {
+                // Same key — just update the entity reference in place
+                const index = this.indexes.get(indexName)!;
 
-                    if (config.isUnique) {
-                        index.set(indexKey, newEntity);
-                    } else {
-                        const entities = index.get(indexKey) as Entity<EntityData>[] | undefined;
-                        if (entities) {
-                            const entityIndex = entities.findIndex(e => e.id === oldEntity.id);
-                            if (entityIndex !== -1) {
-                                entities[entityIndex] = newEntity;
-                            }
+                if (config.isUnique) {
+                    index.set(oldIndexKey, newEntity);
+                } else {
+                    const entities = index.get(oldIndexKey) as Entity<EntityData>[] | undefined;
+                    if (entities) {
+                        const entityIndex = entities.findIndex(e => e.id === oldEntity.id);
+                        if (entityIndex !== -1) {
+                            entities[entityIndex] = newEntity;
                         }
                     }
                 }
@@ -431,11 +412,8 @@ export class InMemoryStore extends Store {
             // Create the change object to get what fields actually changed
             const change = Change.update(oldEntity, entity);
 
-            // Extract changed fields from the change object
-            const changedFields = new Set(Object.keys(change.forwardComponent));
-
-            // Use optimized update that only touches affected indexes
-            this.indexManager.updateEntity(oldEntity, entity, changedFields);
+            // Update indexes by comparing actual index keys on old vs new entity
+            this.indexManager.updateEntity(oldEntity, entity);
 
             return change;
         }

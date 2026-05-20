@@ -117,7 +117,7 @@ export abstract class Store {
             for (const change of delta.changes()) {
                 try {
                     const appliedChange = this._applyChangeCore(change);
-                    appliedDelta.addChangeFromData(appliedChange.data);
+                    appliedDelta.addChange(appliedChange);
                 } catch (error) {
                     if (!skipIrrationalOperations || !(error instanceof IrrationalStorageOperation)) {
                         throw error;

@@ -88,14 +88,30 @@ class SqliteVcsAdapter(VcsAdapter):
 
         return graph
 
-    def get_commits(self, ids: list[str]) -> list[Commit]:
+    def get_commits(self, ids: list[str] | None = None) -> list[Commit]:
         result: list[Commit] = []
         with self._ctx():
-            for commit_id in ids:
-                row = CommitRow.get_or_none(CommitRow.id == commit_id)
-                if row is None:
-                    raise ValueError(f"Commit {commit_id} not found")
-                result.append(self._row_to_commit(row))
+            if ids is None:
+                # Full table scan — return all commits (used by hydration)
+                for row in CommitRow.select():
+                    result.append(self._row_to_commit(row))
+            else:
+                # Batch fetch by IDs in chunks to stay within SQLite variable limits
+                CHUNK_SIZE = 500
+                # Build an id→position map to preserve requested order
+                id_to_pos = {cid: i for i, cid in enumerate(ids)}
+                result = [None] * len(ids)  # type: ignore[list-item]
+                for start in range(0, len(ids), CHUNK_SIZE):
+                    chunk = ids[start : start + CHUNK_SIZE]
+                    for row in CommitRow.select().where(
+                        CommitRow.id << chunk
+                    ):  # type: ignore[operator]  # peewee Field.__lshift__ → SQL IN
+                        pos = id_to_pos[row.id]
+                        result[pos] = self._row_to_commit(row)
+                # Check for missing commits
+                for i, commit in enumerate(result):
+                    if commit is None:
+                        raise ValueError(f"Commit {ids[i]} not found")
         return result
 
     def apply_update(self, update: InternalRepoUpdate) -> None:

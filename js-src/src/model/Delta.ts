@@ -44,7 +44,7 @@ export class Delta {
     static fromChanges(changes: Change[]): Delta {
         let delta = new Delta({});
         for (const change of changes) {
-            delta.addChangeFromData(change.data)
+            delta.addChange(change)
         }
         return delta;
     }
@@ -76,13 +76,12 @@ export class Delta {
         return new Delta(reversedData);
     }
 
-    addChangeFromData(changeData: ChangeData) {
-        const [entityId] = changeData;
-        if (this._data[entityId] !== undefined) {
-            // Merge the changes
-            this.mergeChangeWithPriority(new Change(changeData));
+    /** Adds a change to this delta (consumed — caller should not reuse it). */
+    addChange(change: Change) {
+        if (this._data[change.entityId] !== undefined) {
+            this.mergeChangeWithPriority(change);
         } else {
-            this._data[entityId] = changeData;
+            this._data[change.entityId] = change.data;
         }
     }
 
@@ -140,7 +139,7 @@ export class Delta {
 
         // If no existing (first) change for this entity, just add the new one
         if (!firstChange) {
-            this.addChangeFromData(change.data);
+            this.addChange(change);
             return;
         }
 
@@ -215,7 +214,24 @@ export class Delta {
             this.removeChange(change.entityId);
 
         /**
-         * 5) EMPTY or unhandled
+         * 5) UPDATE > DELETE
+         *    Entity was updated, then deleted. Net effect = DELETE with
+         *    the reverse being the original state (before the update).
+         *    The DELETE's reverse has the full state at deletion time (S1).
+         *    We overlay the UPDATE's reverse fields to recover the pre-update state (S0).
+         */
+        } else if (firstCT === ChangeType.UPDATE && nextCT === ChangeType.DELETE) {
+            const stateAtDeletion = change.reverseComponent;       // S1 (full)
+            const updatedFieldsOldValues = firstChange.reverseComponent; // partial S0 fields
+            const originalState = { ...stateAtDeletion, ...updatedFieldsOldValues };
+            this._data[change.entityId] = [
+                change.entityId,
+                originalState,   // reverse => full state before any changes (S0)
+                {}               // forward => empty (entity is gone)
+            ];
+
+        /**
+         * 6) EMPTY or unhandled
          *    If the new change is empty, do nothing; if it's an irrational
          *    sequence (like 'Update > Create' on an entity that didn't exist),
          *    log an error.
@@ -263,7 +279,7 @@ export function squashDeltas(deltas: DeltaData[]) {
     const squashedDelta = new Delta({});
 
     for (let delta of deltas) {
-        squashedDelta.mergeWithPriority(new Delta(delta));
+        squashedDelta.mergeWithPriority(new Delta(structuredClone(delta)));
     }
 
     return squashedDelta;

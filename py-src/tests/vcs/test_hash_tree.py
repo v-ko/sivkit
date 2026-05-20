@@ -1,5 +1,6 @@
 """Tests for HashTree."""
 
+from fusion.storage.change import Change
 from fusion.storage.delta import Delta
 from fusion.storage.hash_tree import (
     HangingSubtreesError,
@@ -138,3 +139,33 @@ def test_update_hash_tree_incremental(DummyPage, DummyNote):
     # Full rebuild should match
     tree_full = build_hash_tree(store)
     assert tree_full.root_hash() == hash_after
+
+
+def test_update_hash_tree_reparenting(DummyPage, DummyNote):
+    """update_hash_tree must handle parent_id changes (reparenting)."""
+    store = InMemoryStore()
+    page1 = DummyPage(id="p1", parent_id="", name="Page1")
+    page2 = DummyPage(id="p2", parent_id="", name="Page2")
+    note = DummyNote(id="n1", parent_id="p1", test_prop="hello")
+    store.insert_one(page1)
+    store.insert_one(page2)
+    store.insert_one(note)
+
+    tree = build_hash_tree(store)
+
+    # Move note from p1 to p2 via UPDATE
+    old_note = store.find_one(id="n1")
+    new_note = old_note.copy()
+    new_note.parent_id = "p2"
+    change = Change.update(old_note, new_note)
+    store.update_one(new_note)
+    delta = Delta.from_changes([change])
+    update_hash_tree(tree, store, delta)
+
+    # Incremental must match rebuild
+    rebuilt = build_hash_tree(store)
+    assert tree.root_hash() == rebuilt.root_hash()
+
+    # Verify structural move
+    assert "n1" in tree.nodes["p2"].children
+    assert "n1" not in tree.nodes["p1"].children

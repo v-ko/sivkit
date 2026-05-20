@@ -164,7 +164,7 @@ export async function autoMergeForSync(repo: Repository, localBranchName: string
                             }
                         }
                         localCommit.delta.removeChange(entityId)
-                        localCommit.delta.addChangeFromData(localChange.data)
+                        localCommit.delta.addChange(localChange)
                     }
                 }
             }

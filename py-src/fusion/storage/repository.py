@@ -165,6 +165,9 @@ class Repository:
         if timestamp is None:
             timestamp = time.time() * 1000
 
+        if delta.is_empty():
+            raise ValueError("Cannot commit an empty delta")
+
         # Apply to the head store
         applied_delta = self._head_store.apply_delta(delta)
 
@@ -316,16 +319,15 @@ class Repository:
         if last_commit and last_commit.snapshot_hash:
             snapshot_hash = self._hash_tree.root_hash()
             if snapshot_hash != last_commit.snapshot_hash:
-                log.error(
-                    "Snapshot hash mismatch: computed=%s, stored=%s, "
-                    "commit_id=%s, entity_count=%d",
-                    snapshot_hash,
-                    last_commit.snapshot_hash,
-                    last_commit.id,
-                    len(list(self._head_store.find())),
+                entity_count = len(list(self._head_store.find()))
+                msg = (
+                    f"Snapshot hash mismatch after hydration: "
+                    f"computed={snapshot_hash[:16]}..., "
+                    f"stored={last_commit.snapshot_hash[:16]}..., "
+                    f"commit_id={last_commit.id}, "
+                    f"entity_count={entity_count}"
                 )
-                raise RepositoryIntegrityError(
-                    "Snapshot hash mismatch after hydration from VcsAdapter"
-                )
+                log.error(msg)
+                raise RepositoryIntegrityError(msg)
 
         self._commit_graph = remote_graph

@@ -4,12 +4,12 @@ from copy import deepcopy
 from typing import Any, Generator
 
 from fusion import get_logger
-from fusion.storage.change import Change, ChangeTypes
+from fusion.storage.change import Change, ChangeData, ChangeTypes
 
 log = get_logger(__name__)
 
 # {entity_id: [entity_id, reverse_component, forward_component]}
-DeltaData = dict[str, Any]
+DeltaData = dict[str, ChangeData]
 
 
 def _entity_keys_are_equal(value1: Any, value2: Any, depth: int = 1) -> bool:
@@ -72,8 +72,8 @@ def _change_reduces_to_none(change: Change) -> bool:
 class Delta:
     """A collection of Changes grouped by entity ID, with merge logic."""
 
-    def __init__(self, data: DeltaData | None = None):
-        self._data: DeltaData = data or {}
+    def __init__(self, changes: dict[str, Change] | None = None):
+        self._data: dict[str, Change] = changes or {}
 
     @staticmethod
     def from_changes(changes: list[Change]) -> Delta:
@@ -91,7 +91,7 @@ class Delta:
         return Delta(changes)
 
     def asdict(self) -> DeltaData:
-        return {eid: list(change.asdict()) for eid, change in self._data.items()}
+        return {eid: change.asdict() for eid, change in self._data.items()}
 
     def changes(self) -> Generator[Change, None, None]:
         for change in self._data.values():
@@ -192,7 +192,22 @@ class Delta:
         elif first_ct == ChangeTypes.CREATE and next_ct == ChangeTypes.DELETE:
             self.remove_change(change.entity_id)
 
-        # 5) Empty or irrational
+        # 5) Update > Delete
+        elif first_ct == ChangeTypes.UPDATE and next_ct == ChangeTypes.DELETE:
+            # Net effect = DELETE with the original state (before the update).
+            # The DELETE's reverse has the full state at deletion time (S1).
+            # Overlay the UPDATE's reverse fields to recover pre-update state (S0).
+            original_state = {
+                **change.reverse_component,
+                **first_change.reverse_component,
+            }
+            self._data[change.entity_id] = Change(
+                change.entity_id,
+                original_state,
+                {},
+            )
+
+        # 6) Empty or irrational
         elif next_ct == ChangeTypes.EMPTY:
             pass
         else:
