@@ -127,4 +127,23 @@ describe("InMemoryStore", () => {
         let all_entities = [...store.find()];
         expect(all_entities.length).toBe(0);
     });
+
+    test("Store copies on insert and update — external mutation is isolated", () => {
+        let page = new DummyPage({ id: "copy-test", parent_id: '', name: "Original" });
+        store.insertOne(page);
+
+        // Mutating original doesn't affect store
+        page._data.name = "Mutated";
+        let stored = store.findOne({ id: "copy-test" }) as DummyPage;
+        expect(stored._data.name).toBe("Original");
+        expect(stored).not.toBe(page);
+
+        // updateOne detects the diff and fires onChanges
+        const deltas: Delta[] = [];
+        store.onChanges = (d: Delta) => deltas.push(d);
+        let change = store.updateOne(page);
+        expect(change.isEmpty()).toBe(false);
+        expect(deltas.length).toBe(1);
+        expect((store.findOne({ id: "copy-test" }) as DummyPage)._data.name).toBe("Mutated");
+    });
 });

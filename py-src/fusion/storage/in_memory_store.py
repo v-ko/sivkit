@@ -129,7 +129,7 @@ class InMemoryStore(Store):
                 except TypeError:
                     result = None
                 if result:
-                    yield result
+                    yield result.copy()
                 return
 
             # If searching by parent_id - use the index to do it efficiently
@@ -156,7 +156,8 @@ class InMemoryStore(Store):
             # Apply the rest of the filter
             if filter:
                 search_set = find_many_by_props(search_set, **filter)
-            yield from search_set
+            for entity in search_set:
+                yield entity.copy()
 
     def load_data(self, entities: list[Entity], origin: str | None = None) -> Delta:
         with self._lock:

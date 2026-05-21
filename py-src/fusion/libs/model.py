@@ -193,10 +193,8 @@ class Entity:
             old_val = old_state.get(key)
             new_val = new_state.get(key)
             if old_val != new_val:
-                if old_val is not None:
-                    reverse_delta[key] = old_val
-                if new_val is not None:
-                    forward_delta[key] = new_val
+                reverse_delta[key] = old_val
+                forward_delta[key] = new_val
 
         return Change(self.id, reverse_delta, forward_delta)
 

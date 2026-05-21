@@ -51,8 +51,9 @@ interface PendingAck {
 
 type WsSyncMessage =
     | { type: 'full_state'; seq: number; entities: SerializedEntityData[] }
-    | { type: 'delta'; seq: number; delta: DeltaData }
-    | { type: 'ack'; seq: number };
+    | { type: 'delta'; seq: number; base_seq: number; delta: DeltaData }
+    | { type: 'ack'; seq: number }
+    | { type: 'reject'; seq: number; server_seq: number };
 
 export class WebSocketSyncService implements StoreSyncService {
     private _store: InMemoryStore | null = null;
@@ -156,10 +157,11 @@ export class WebSocketSyncService implements StoreSyncService {
             return Promise.reject(new Error('WebSocket not connected'));
         }
 
+        const base_seq = this._seq;
         this._seq++;
         const seq = this._seq;
 
-        this._send({ type: 'delta', seq, delta: delta.data });
+        this._send({ type: 'delta', seq, base_seq, delta: delta.data });
 
         // Return a promise that resolves on ACK or rejects on timeout
         return new Promise<void>((resolve, reject) => {
@@ -207,6 +209,19 @@ export class WebSocketSyncService implements StoreSyncService {
                 if (entry) {
                     clearTimeout(entry.timer);
                     entry.resolve();
+                    this._pendingAcks.delete(msg.seq);
+                }
+                break;
+            }
+
+            case 'reject': {
+                log.warning(`Delta seq ${msg.seq} rejected (server_seq=${msg.server_seq})`);
+                const rejEntry = this._pendingAcks.get(msg.seq);
+                if (rejEntry) {
+                    clearTimeout(rejEntry.timer);
+                    rejEntry.reject(new Error(
+                        `Delta rejected: stale base_seq (server_seq=${msg.server_seq})`
+                    ));
                     this._pendingAcks.delete(msg.seq);
                 }
                 break;

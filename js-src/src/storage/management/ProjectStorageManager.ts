@@ -208,8 +208,10 @@ export class ProjectStorageManager {
             if (e instanceof MissingBranchError && headStoreData) {
                 log.info(`VCS store empty, creating repository from ${headStoreData.length} domain store entities`);
                 this._onDeviceRepo = await Repository.create(this.config.onDeviceVcsAdapter, true);
-                const initialDelta = Delta.fromChanges(headStoreData.map(e => Change.create(e)));
-                await this._onDeviceRepo.commit(initialDelta, 'Initial commit from domain store');
+                if (headStoreData.length > 0) {
+                    const initialDelta = Delta.fromChanges(headStoreData.map(e => Change.create(e)));
+                    await this._onDeviceRepo.commit(initialDelta, 'Initial commit from domain store');
+                }
             } else {
                 if (e instanceof RepositoryIntegrityError) {
                     let storageAdapter = await getVcsAdapter(this.config.onDeviceVcsAdapter);
@@ -234,8 +236,10 @@ export class ProjectStorageManager {
                     await adapter.eraseStorage();
 
                     this._onDeviceRepo = await Repository.create(this.config.onDeviceVcsAdapter, true);
-                    const initialDelta = Delta.fromChanges(headStoreData!.map(e => Change.create(e)));
-                    await this._onDeviceRepo.commit(initialDelta, 'Re-seed after integrity failure');
+                    if (headStoreData!.length > 0) {
+                        const initialDelta = Delta.fromChanges(headStoreData!.map(e => Change.create(e)));
+                        await this._onDeviceRepo.commit(initialDelta, 'Re-seed after integrity failure');
+                    }
                     this._parentStorageService?.reportError(
                         'VCS integrity check failed. The version history was discarded and recreated from the current data. No data was lost, but commit history is gone.'
                     );
