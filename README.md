@@ -151,7 +151,7 @@ The same pattern applies in Python/Qt — entities and stores are the same, view
 from fusion.platform.qt_widgets import Property
 from PySide6.QtCore import QObject, Signal
 
-class CounterState(QObject):
+class CounterViewState(QObject):
     count_changed = Signal(int)
 
     def __init__(self):
@@ -173,11 +173,87 @@ class CounterState(QObject):
 from fusion.libs.action import action
 
 @action("counter.increment")
-def increment(state: CounterState, amount: int = 1):
+def increment(state: CounterViewState, amount: int = 1):
     state.count = state.count + amount
 ```
 
-For QML, expose the state and a thin `@Slot` backend via `setContextProperty`. For QWidgets, connect to signals directly.
+For QML, expose the view state and a thin `@Slot` ViewModel via `setContextProperty`. For QWidgets, connect to signals directly.
+
+### QWidgets example
+
+The widget connects directly to the view state's signals:
+
+```python
+from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
+
+
+class CounterWidget(QWidget):
+    def __init__(self, state: CounterViewState):
+        super().__init__()
+        self._state = state
+
+        self._label = QLabel(str(state.count))
+        btn = QPushButton("+1")
+        btn.clicked.connect(lambda: increment(self._state))
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._label)
+        layout.addWidget(btn)
+
+        # View reacts to state changes
+        state.count_changed.connect(self._on_count_changed)
+
+    def _on_count_changed(self, value: int):
+        self._label.setText(str(value))
+```
+
+### QML example
+
+A ViewModel bridges the view state to QML-compatible `Property` declarations:
+
+```python
+# counter_view_model.py
+from PySide6.QtCore import Property, QObject, Signal, Slot
+
+
+class CounterViewModel(QObject):
+    count_changed = Signal()
+
+    def __init__(self, state: CounterViewState, parent=None):
+        super().__init__(parent)
+        self._state = state
+        state.count_changed.connect(self.count_changed)
+
+    @Property(int, notify=count_changed)
+    def count(self) -> int:
+        return self._state.count
+
+    @Slot()
+    def increment(self):
+        increment(self._state)
+```
+
+Expose it to QML:
+
+```python
+vm = CounterViewModel(state)
+engine.rootContext().setContextProperty("counterVM", vm)
+```
+
+The QML view binds to the ViewModel:
+
+```qml
+import QtQuick
+import QtQuick.Controls
+
+Column {
+    Label { text: counterVM.count }
+    Button {
+        text: "+1"
+        onClicked: counterVM.increment()
+    }
+}
+```
 
 ## Testing
 Both Python (`pytest`) and TypeScript test suites are available.
@@ -291,3 +367,7 @@ def on_store_change(self, change):
     if self._future and not self._future.done():
         self._future.set_result(change.data)
 ```
+
+
+# Model library
+Entity constraints: serialization is done 3 levels deep. So note.content.image.width is good. But any deeper than that is out of scope. Diffing is done 1 level deep. So when you change the image.width - the setter method should swap the content object.

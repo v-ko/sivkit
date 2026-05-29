@@ -237,21 +237,34 @@ class WebSocketSyncService:
 
     async def _send_loop(self, send: SendFn) -> None:
         while self.running:
-            seq, base_seq, delta_data, future = await self._outbound.get()
+            try:
+                seq, base_seq, delta_data, future = await self._outbound.get()
+            except asyncio.CancelledError:
+                break
 
             self._pending_acks[seq] = future
 
-            await send(
-                {
-                    "type": "delta",
-                    "seq": seq,
-                    "base_seq": base_seq,
-                    "delta": delta_data,
-                }
-            )
+            try:
+                await send(
+                    {
+                        "type": "delta",
+                        "seq": seq,
+                        "base_seq": base_seq,
+                        "delta": delta_data,
+                    }
+                )
+            except (asyncio.CancelledError, Exception):
+                # Connection gone — cancel future and exit
+                if not future.done():
+                    future.cancel()
+                self._pending_acks.pop(seq, None)
+                break
 
             try:
                 await asyncio.wait_for(asyncio.shield(future), timeout=ACK_TIMEOUT)
+            except asyncio.CancelledError:
+                # Task cancelled (connection closed) — clean exit
+                break
             except asyncio.TimeoutError:
                 log.error("ACK timeout for seq %d", seq)
                 pa = self._pending_acks.pop(seq, None)
@@ -264,36 +277,40 @@ class WebSocketSyncService:
         send: SendFn,
         receive: ReceiveFn,
     ) -> None:
-        while self.running:
-            msg = await receive()
-            msg_type = msg.get("type")
+        try:
+            while self.running:
+                msg = await receive()
+                msg_type = msg.get("type")
 
-            if msg_type == "delta":
-                await self._handle_remote_delta(msg, send)
+                if msg_type == "delta":
+                    await self._handle_remote_delta(msg, send)
 
-            elif msg_type == "ack":
-                future = self._pending_acks.pop(msg["seq"], None)
-                if future is not None and not future.done():
-                    future.set_result(None)
+                elif msg_type == "ack":
+                    future = self._pending_acks.pop(msg["seq"], None)
+                    if future is not None and not future.done():
+                        future.set_result(None)
 
-            elif msg_type == "full_state":
-                self._handle_full_state(msg)
+                elif msg_type == "full_state":
+                    self._handle_full_state(msg)
 
-            elif msg_type == "reject":
-                # REJECT mode: authority refused our delta
-                log.warning(
-                    "Delta seq %d rejected (server_seq=%d)",
-                    msg.get("seq"),
-                    msg.get("server_seq"),
-                )
-                future = self._pending_acks.pop(msg["seq"], None)
-                if future is not None and not future.done():
-                    future.set_exception(
-                        ProtocolError(f"Delta rejected: stale base_seq")
+                elif msg_type == "reject":
+                    # REJECT mode: authority refused our delta
+                    log.warning(
+                        "Delta seq %d rejected (server_seq=%d)",
+                        msg.get("seq"),
+                        msg.get("server_seq"),
                     )
+                    future = self._pending_acks.pop(msg["seq"], None)
+                    if future is not None and not future.done():
+                        future.set_exception(
+                            ProtocolError(f"Delta rejected: stale base_seq")
+                        )
 
-            else:
-                log.warning("Unknown WS message type: %s", msg_type)
+                else:
+                    log.warning("Unknown WS message type: %s", msg_type)
+        except asyncio.CancelledError:
+            # Connection closed — exit gracefully
+            pass
 
     async def _handle_remote_delta(self, msg: dict[str, Any], send: SendFn) -> None:
         """Process an incoming delta message based on the current sync mode."""

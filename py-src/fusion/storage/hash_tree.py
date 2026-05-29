@@ -360,6 +360,9 @@ def update_hash_tree(tree: HashTree, store: Store, delta: Delta) -> None:
             hash_string = _hash(data_string)
             tree.create_node(change.entity_id, entity.parent_id, hash_string)
 
+        elif change_type == ChangeTypes.EMPTY:
+            continue  # No-op change, skip
+
         else:
             raise ValueError(f"Unexpected change type: {change_type}")
 

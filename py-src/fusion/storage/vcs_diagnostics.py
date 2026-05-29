@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from fusion import get_logger
-from fusion.storage.commit import Commit
+from fusion.storage.commit import Commit, CommitMetadata
 from fusion.storage.delta import Delta
 from fusion.storage.hash_tree import HashTree, build_hash_tree, update_hash_tree
 from fusion.storage.in_memory_store import InMemoryStore
@@ -491,7 +491,7 @@ class HashCheckProgress:
     commit_index: int
     total_commits: int
     commit_id: str
-    status: Literal["ok", "mismatch_fixed", "mismatch_reported"]
+    status: Literal["ok", "mismatch_fixed", "mismatch_reported", "removed"]
     computed_hash: str | None = None
     stored_hash: str | None = None
     # Only populated for mismatches — full commit data for diagnostics
@@ -525,7 +525,73 @@ def verify_or_fix_hashes(
     tree = HashTree()
 
     for i, commit in enumerate(commits):
-        delta = Delta.from_data(commit.delta_data)
+        delta = Delta.from_data(commit.delta_data or {})
+
+        # If the delta is effectively empty, remove the commit
+        if delta.is_empty():
+            if fix:
+                # Re-parent the next commit to skip this one
+                if i + 1 < len(commits):
+                    next_commit = commits[i + 1]
+                    next_commit.parent_id = commit.parent_id
+                    adapter.apply_update(
+                        InternalRepoUpdate(
+                            added_commits=[],
+                            removed_commits=[
+                                CommitMetadata(
+                                    id=commit.id,
+                                    parent_id=commit.parent_id,
+                                    snapshot_hash=commit.snapshot_hash,
+                                    timestamp=commit.timestamp,
+                                    message=commit.message,
+                                )
+                            ],
+                            updated_commits=[next_commit],
+                            added_branches=[],
+                            updated_branches=[],
+                            removed_branches=[],
+                        )
+                    )
+                else:
+                    # Last commit in the chain — remove it and update branch head
+                    from fusion.storage.commit_graph import BranchMetadata
+
+                    adapter.apply_update(
+                        InternalRepoUpdate(
+                            added_commits=[],
+                            removed_commits=[
+                                CommitMetadata(
+                                    id=commit.id,
+                                    parent_id=commit.parent_id,
+                                    snapshot_hash=commit.snapshot_hash,
+                                    timestamp=commit.timestamp,
+                                    message=commit.message,
+                                )
+                            ],
+                            updated_commits=[],
+                            added_branches=[],
+                            updated_branches=[
+                                BranchMetadata(
+                                    name=branch_name,
+                                    head_commit_id=commit.parent_id or None,
+                                )
+                            ],
+                            removed_branches=[],
+                        )
+                    )
+            yield HashCheckProgress(
+                commit_index=i,
+                total_commits=total,
+                commit_id=commit.id,
+                status="removed" if fix else "mismatch_reported",
+                stored_hash=commit.snapshot_hash,
+                delta_data=commit.delta_data,
+                parent_id=commit.parent_id,
+                timestamp=commit.timestamp,
+                message=commit.message,
+            )
+            continue
+
         applied = store.apply_delta(delta)
         update_hash_tree(tree, store, applied)
 
