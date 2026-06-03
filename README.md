@@ -1,13 +1,13 @@
-# Fusion
+# Sivkit
 The library is experimental and subject to API changes.
 
-Fusion provides shared infrastructure for building apps in Python and TypeScript. It's not a GUI framework — it provides entities, stores, actions, and channels, while leaving view/state binding to the platform (Qt, React+MobX, etc.).
+Sivkit provides shared infrastructure for building apps in Python and TypeScript. It's not a GUI framework — it provides entities, stores, actions, and channels, while leaving view/state binding to the platform (Qt, React+MobX, etc.).
 
 Used in [Pamet](https://github.com/v-ko/pamet) (React+MobX web app, Qt WebEngine desktop) and vii-assistant (Python+Qt, not yet published).
 
 ## Installation
-- Python: `pip install python-fusion`
-- TypeScript: the `fusion/` package is used as a local dependency (see `js-src/`)
+- Python: `pip install sivkit`
+- TypeScript: the `sivkit/` package is used as a local dependency (see `typescript/`)
 
 ## Architecture
 
@@ -40,7 +40,7 @@ Below is a condensed but complete picture: entity, view state, store+reducer wir
 
 ```typescript
 // --- 1. Entity definition (fusion) ---
-import { entityType, Entity, EntityData, getEntityId } from "fusion/model/Entity";
+import { entityType, Entity, EntityData, getEntityId } from "sivkit/model/Entity";
 
 interface TodoData extends EntityData {
     text: string;
@@ -54,7 +54,7 @@ class Todo extends Entity<TodoData> {
 }
 
 
-// --- 2. View state (MobX — app-level, not part of fusion) ---
+// --- 2. View state (MobX — app-level, not part of sivkit) ---
 import { observable, makeObservable, ObservableMap } from "mobx";
 
 class TodoViewState {
@@ -76,8 +76,8 @@ class AppViewState {
 
 
 // --- 3. Store + reducer wiring ---
-import { InMemoryStore } from "fusion/storage/domain-store/InMemoryStore";
-import { Delta } from "fusion/model/Delta";
+import { InMemoryStore } from "sivkit/storage/domain-store/InMemoryStore";
+import { Delta } from "sivkit/model/Delta";
 
 const store = new InMemoryStore();
 const appState = new AppViewState();
@@ -99,7 +99,7 @@ store.onChanges = (delta: Delta) => {
 
 
 // --- 4. Actions ---
-import { action, registerRootActionCompletedHook } from "fusion/registries/Action";
+import { action, registerRootActionCompletedHook } from "sivkit/registries/Action";
 
 class TodoActions {
     @action
@@ -148,10 +148,10 @@ The same pattern applies in Python/Qt — entities and stores are the same, view
 
 ```python
 # --- View state ---
-from fusion.platform.qt_widgets import Property
+from sivkit.platform.qt_widgets import Property
 from PySide6.QtCore import QObject, Signal
 
-class CounterState(QObject):
+class CounterViewState(QObject):
     count_changed = Signal(int)
 
     def __init__(self):
@@ -170,14 +170,90 @@ class CounterState(QObject):
         self.count_changed.emit(value)
 
 # --- Action ---
-from fusion.libs.action import action
+from sivkit.libs.action import action
 
 @action("counter.increment")
-def increment(state: CounterState, amount: int = 1):
+def increment(state: CounterViewState, amount: int = 1):
     state.count = state.count + amount
 ```
 
-For QML, expose the state and a thin `@Slot` backend via `setContextProperty`. For QWidgets, connect to signals directly.
+For QML, expose the view state and a thin `@Slot` ViewModel via `setContextProperty`. For QWidgets, connect to signals directly.
+
+### QWidgets example
+
+The widget connects directly to the view state's signals:
+
+```python
+from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
+
+
+class CounterWidget(QWidget):
+    def __init__(self, state: CounterViewState):
+        super().__init__()
+        self._state = state
+
+        self._label = QLabel(str(state.count))
+        btn = QPushButton("+1")
+        btn.clicked.connect(lambda: increment(self._state))
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._label)
+        layout.addWidget(btn)
+
+        # View reacts to state changes
+        state.count_changed.connect(self._on_count_changed)
+
+    def _on_count_changed(self, value: int):
+        self._label.setText(str(value))
+```
+
+### QML example
+
+A ViewModel bridges the view state to QML-compatible `Property` declarations:
+
+```python
+# counter_view_model.py
+from PySide6.QtCore import Property, QObject, Signal, Slot
+
+
+class CounterViewModel(QObject):
+    count_changed = Signal()
+
+    def __init__(self, state: CounterViewState, parent=None):
+        super().__init__(parent)
+        self._state = state
+        state.count_changed.connect(self.count_changed)
+
+    @Property(int, notify=count_changed)
+    def count(self) -> int:
+        return self._state.count
+
+    @Slot()
+    def increment(self):
+        increment(self._state)
+```
+
+Expose it to QML:
+
+```python
+vm = CounterViewModel(state)
+engine.rootContext().setContextProperty("counterVM", vm)
+```
+
+The QML view binds to the ViewModel:
+
+```qml
+import QtQuick
+import QtQuick.Controls
+
+Column {
+    Label { text: counterVM.count }
+    Button {
+        text: "+1"
+        onClicked: counterVM.increment()
+    }
+}
+```
 
 ## Testing
 Both Python (`pytest`) and TypeScript test suites are available.
@@ -243,7 +319,7 @@ Procedures are the async counterpart to actions. Actions are synchronous and mut
 The Qt-asyncio integration must be installed before any procedure can run. This happens automatically when using `QtMainLoop`:
 
 ```python
-from fusion.platform.qt_widgets.qt_main_loop import QtMainLoop
+from sivkit.platform.qt_widgets.qt_main_loop import QtMainLoop
 
 app = QApplication(sys.argv)
 main_loop = QtMainLoop(app)  # installs the async event loop
@@ -255,8 +331,8 @@ Under the hood, `QtAsyncEventLoop` integrates asyncio into Qt's event loop via `
 ### Usage
 
 ```python
-from fusion import procedure
-from fusion.libs.action import action
+from sivkit import procedure
+from sivkit.libs.action import action
 
 @action('update_shapes')
 def update_shapes(overlay, shapes):
@@ -271,11 +347,54 @@ async def run_experiment(facade):
 
 Calling a `@procedure` function schedules it as a Task and returns the Task immediately. It can be called from sync code (fire-and-forget) or awaited from other async code.
 
+### Task handling
+
+Procedures return a `Task` subclass with fluent Promise-like methods for handling results and errors:
+
+```python
+from sivkit.libs.procedure import procedure
+from sivkit.libs.action import action
+
+@action('show_data')
+def show_data(view_state, data):
+    view_state.data = data
+
+@action('show_spinner')
+def show_spinner(view_state, visible: bool):
+    view_state.spinner_visible = visible
+
+@procedure
+async def fetch_data(view_state, url: str) -> None:
+    show_spinner(view_state, True)
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        raise
+    finally:
+        show_spinner(view_state, False)
+    show_data(view_state, data)
+
+# In a ViewModel slot — fire-and-forget with error logging:
+def on_button_clicked(self):
+    fetch_data(self._state, "http://localhost:8000/api") \
+        .catch(lambda exc: log.error("Fetch failed: %s", exc))
+```
+
+- `.then(on_result)` — called with the return value on success
+- `.catch(on_exception)` — called with the exception on failure (not on cancel)
+- `.on_cancel(callback)` — called when the task is cancelled
+- `.finally_(callback)` — called regardless of outcome
+
+All methods return `self` for chaining. Actions are called inside the procedure around the async work — the call site only needs `.catch()` for logging unexpected failures.
+
 ### Guidelines
 
 - **Single thread**: Procedures run on the Qt main thread. No locks needed between procedures and actions.
 - **Actions inside procedures**: Call actions normally — they execute synchronously at the `await` yield points.
-- **Fire-and-forget**: Call from a Qt slot or callback — the Task runs in the background. Unhandled exceptions are logged automatically.
+- **Fire-and-forget**: Call from a Qt slot or callback — the Task runs in the background. Use `.catch()` to handle errors.
 - **Awaitable**: From other async code, `await my_procedure()` to get the result.
 - **Futures for external events**: Create an `asyncio.Future`, store it, `await` it. Resolve it from a callback (e.g. store change handler). This bridges event-driven callbacks into linear async flow.
 
@@ -291,3 +410,21 @@ def on_store_change(self, change):
     if self._future and not self._future.done():
         self._future.set_result(change.data)
 ```
+
+
+# Model library
+Entity constraints: serialization is done 3 levels deep. So note.content.image.width is good. But any deeper than that is out of scope. Diffing is done 1 level deep. So when you change the image.width - the setter method should swap the content object.
+
+
+# Projections
+When domain objects change (e.g. the Note object's text is changed) - we want to have a *projection* to translate that change from the domain model to the view model. So e.g. if a page is open and a note is deleted - the projector function removes the view state for that note and the view layer reacts accordingly to disappear the note.
+
+ * Reactions - if we find ourselves in need of doing view state updates based on other viewstate changes - we probably need a projector from the source domain state. Reactions are an antipattern
+
+
+## Allowed vertical dependencies
+Inside of a vertical generally all access is permitted, given that we try to keep it sane - hierarchical organization is important to avoid unnecessary spaghettification. So an action can call any other action. A view can access any other view. Same for ViewStates.
+
+Views receive user input. They should freely access actions. Also via the facade they can access services. Since ViewStates are the source of truth for the display - views should have access to the whole view state vertical via the facade. But altering the view-states directly is prohibited.
+
+Actions should not touch views. They are the only place view-states are altered. Optimally actions would receive the view states that they work with via argument (though in practice that's not enforced yet). Actions have domain-store access, and should also be the only place domain-store changes are made. The reason for that is that we wire domain-store changes to projector functions, which make view-state changes to reflect domain changes in the view layer.
