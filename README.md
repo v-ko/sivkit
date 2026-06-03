@@ -18,13 +18,13 @@ There's a domain store (the **frontend domain store** / FDS), which the UI opera
 After the outermost (root) action completes, **root action hooks** fire — used for undo recording, auto-save, logging, etc.
 
 ```mermaid
-flowchart LR
+flowchart TD
     View -- "user interaction" --> Action
-    Action -- "entity CRUD" --> Store["Domain Store (FDS)"]
-    Store -- "onChanges(delta)" --> Reducer["View State Reducer"]
-    Reducer -- "create/update/delete view states" --> ViewState["View State (observable)"]
+    Action -- "entity CRUD" --> Store["Domain Store\n(FDS)"]
+    Store -- "onChanges(delta)" --> Reducer["View State\nReducer"]
+    Reducer -- "update view states" --> ViewState["View State\n(observable)"]
     ViewState -- "re-render" --> View
-    Action -. "root action hooks" .-> Hooks["Undo / Auto-save / Logging"]
+    Action -. "root action hooks" .-> Hooks["Undo / Auto-save\n/ Logging"]
 ```
 
 ### Concepts
