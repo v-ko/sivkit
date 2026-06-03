@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from sivkit.logging import get_logger
 from sivkit.storage.base_store import Store
 from sivkit.storage.websocket_sync_service import WebSocketSyncService
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 try:
     from starlette.websockets import WebSocket, WebSocketDisconnect

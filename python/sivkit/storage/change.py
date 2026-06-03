@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import logging
 from enum import Enum
 from typing import Any
 
-from sivkit import get_logger
 from sivkit.libs.model import Entity, dump_to_dict
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 # Wire format: [entity_id, reverse_component, forward_component]
 # Kept as list (not tuple) for consistency with JSON deserialization output.

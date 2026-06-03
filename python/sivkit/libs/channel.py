@@ -6,14 +6,15 @@ it's expected that the subscribed callables are light, since the main purpose
 of sivkit is GUI rendering and blocking the main loop would cause freezing.
 """
 
+import logging
 from collections import defaultdict
 from dataclasses import MISSING
 from typing import Any, Callable, Dict
 
 import sivkit
-from sivkit import get_logger
+from sivkit.logging import traced
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 _channels = {}
 
@@ -64,7 +65,7 @@ class Channel:
     def __repr__(self):
         return f"<Channel name={self.name}>"
 
-    @log.traced
+    @traced(log)
     def push(self, message):
         if self.subchannel_classifier:
             if not self.subchannel_classifier(message):

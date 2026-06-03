@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 import peewee as pw
 
-from sivkit import get_logger
 from sivkit.storage.commit import Commit, CommitMetadata
 from sivkit.storage.commit_graph import BranchMetadata, CommitGraph, CommitGraphData
 from sivkit.storage.vcs_adapter import InternalRepoUpdate, VcsAdapter
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 _ALL_MODELS: list[type[pw.Model]] = []
 

@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from typing import Any
 
-from sivkit import get_logger
 from sivkit.libs.canonical_json import canonical_json
 from sivkit.libs.model import Entity, dump_to_dict
 from sivkit.storage.base_store import Store
 from sivkit.storage.change import ChangeTypes
 from sivkit.storage.delta import Delta
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 
 class HangingSubtreesError(Exception):

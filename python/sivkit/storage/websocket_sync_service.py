@@ -44,17 +44,17 @@ callables, so it works with any WebSocket library.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from typing import Any
 
 from sivkit.libs.model import dump_to_dict, load_from_dict
-from sivkit.logging import get_logger
 from sivkit.storage.base_store import Store
 from sivkit.storage.change import Change
 from sivkit.storage.delta import Delta, DeltaData
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 # Type aliases for the transport callables.
 SendFn = Callable[[dict[str, Any]], Awaitable[None]]

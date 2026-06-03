@@ -3,7 +3,7 @@ import random
 import time
 from typing import Any, Callable
 
-from sivkit.logging import get_logger
+from sivkit.logging import configure_logging, traced
 from sivkit.loop import MainLoop, NoMainLoop
 
 __version__ = importlib.metadata.version("sivkit")

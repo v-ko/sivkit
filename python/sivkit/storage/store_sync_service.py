@@ -14,15 +14,15 @@ This is the server-side counterpart to the TypeScript
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from collections.abc import AsyncGenerator
 
 from sivkit.libs.model import dump_to_dict
-from sivkit.logging import get_logger
 from sivkit.storage.delta import Delta, DeltaData
 from sivkit.storage.in_memory_store import InMemoryStore
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 
 # Sentinel yielded when the client's ``after`` is too far behind the ring buffer.

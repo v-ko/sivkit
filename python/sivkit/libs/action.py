@@ -1,11 +1,10 @@
 import functools
+import logging
 import time
 from enum import Enum
 from typing import Callable
 
-from sivkit.logging import get_logger
-
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 
 class ActionRunStates(Enum):

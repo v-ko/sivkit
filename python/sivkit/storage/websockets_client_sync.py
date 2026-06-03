@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
-from sivkit.logging import get_logger
 from sivkit.storage.base_store import Store
 from sivkit.storage.websocket_sync_service import WebSocketSyncService
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 try:
     import websockets

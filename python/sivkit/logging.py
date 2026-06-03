@@ -3,23 +3,19 @@ import logging
 import os
 import threading
 from collections import defaultdict
-from enum import Enum
 from typing import Callable
 
 
-class LoggingLevels(Enum):
-    # Those should be stdlib logging compatible
-    CRITICAL = 50
-    ERROR = 40
-    WARNING = 30
-    INFO = 20
-    DEBUG = 10
-    NOTSET = 0
+def configure_logging():
+    """Configure logging from the LOGLEVEL environment variable.
+    Call this once at app startup."""
+    level_name = os.environ.get("LOGLEVEL", "ERROR")
+    level = getattr(logging, level_name, logging.ERROR)
+    logging.basicConfig(level=level)
 
 
-log_lvl_name = os.environ.get("LOGLEVEL", LoggingLevels.ERROR.name)
-print(f"Loaded logging level {log_lvl_name=}")
-LOGGING_LEVEL = LoggingLevels[log_lvl_name].value
+# Auto-configure on import for backward compatibility
+configure_logging()
 
 
 class BColors:
@@ -34,103 +30,62 @@ class BColors:
     UNDERLINE = "\033[4m"
 
 
-function_call_stack_per_thread = defaultdict(list)
-logging.basicConfig(level=LOGGING_LEVEL)
+_function_call_stack_per_thread = defaultdict(list)
 
 
-def _get_trace_decorator(logger_name: str):
-    def trace_decorator(func: Callable):
-        # Wrap the function only at DEBUG level
-        if LOGGING_LEVEL != logging.DEBUG:
+def traced(logger: logging.Logger):
+    """Decorator factory that traces function calls at DEBUG level.
+
+    Produces indented call-stack output with colored function names,
+    showing arguments and return values per thread.
+
+    Usage:
+        import logging
+        from sivkit.logging import traced
+
+        log = logging.getLogger(__name__)
+
+        @traced(log)
+        def my_function(foo):
+            log.info('doing stuff')
+            return foo
+    """
+
+    def decorator(func: Callable):
+        if not logger.isEnabledFor(logging.DEBUG):
             return func
 
-        name = ".".join([logger_name, func.__name__])
-
-        # Set color to the func name to have it stand out
-        name_str = "%s.%s%s%s" % (
-            logger_name,
-            BColors.OKBLUE,
-            func.__name__,
-            BColors.ENDC,
-        )
-        log = logging.getLogger("TRACE: ")
+        name = f"{logger.name}.{func.__name__}"
+        name_str = f"{logger.name}.{BColors.OKBLUE}{func.__name__}{BColors.ENDC}"
+        trace_log = logging.getLogger("TRACE")
 
         @functools.wraps(func)
-        def wrapper_func(*args, **kwargs):
-            # Keep separate function stacks per thread
+        def wrapper(*args, **kwargs):
             thread_id = threading.get_ident()
-            function_call_stack_per_thread[thread_id].append(name)
+            _function_call_stack_per_thread[thread_id].append(name)
 
-            # Prep the log string
-            stack_depth = len(function_call_stack_per_thread[thread_id])
+            stack_depth = len(_function_call_stack_per_thread[thread_id])
             indent = "." * 4 * (stack_depth - 1)
 
-            args_string = ", ".join([str(a) for a in args])
-            kwargs_string = ", ".join([f"{k}={v}" for k, v in kwargs.items()])
+            args_string = ", ".join(str(a) for a in args)
+            kwargs_string = ", ".join(f"{k}={v}" for k, v in kwargs.items())
 
             msg = (
                 f"{indent}CALL: {name_str} "
                 f"ARGS=*({args_string}) KWARGS=**{{{kwargs_string}}}"
             )
-            log.debug(msg, extra={"markup": True})
+            trace_log.debug(msg)
 
             result = func(*args, **kwargs)
 
-            popped_name = function_call_stack_per_thread[thread_id].pop()
+            popped_name = _function_call_stack_per_thread[thread_id].pop()
             if popped_name != name:
                 raise Exception("Stack continuity error")
 
-            log.debug("%sEND : %s RETURNED=%s" % (indent, name_str, result))
+            trace_log.debug(f"{indent}END:  {name_str} -> {result}")
 
             return result
 
-        return wrapper_func
+        return wrapper
 
-    return trace_decorator
-
-
-class Logger:
-    def __init__(self, name: str):
-        self.py_logger = logging.getLogger(name)
-        self.traced = _get_trace_decorator(name)
-
-    def critical(self, *args, **kwargs):
-        self.py_logger.critical(*args, **kwargs)
-
-    def error(self, *args, **kwargs):
-        self.py_logger.error(*args, **kwargs)
-
-    def warning(self, *args, **kwargs):
-        self.py_logger.warning(*args, **kwargs)
-
-    def info(self, *args, **kwargs):
-        self.py_logger.info(*args, **kwargs)
-
-    def debug(self, *args, **kwargs):
-        self.py_logger.debug(*args, **kwargs)
-
-
-def get_logger(name: str) -> Logger:
-    """Get a logger with the given name. This is the preferred way of logging
-    for apps using Misli.
-
-    Normally you would provide the file __name__ as the logger name. The logger
-     has a trace decorator that reports the calls of decorated functions as
-    a stack in order to have a visually distinct output while debugging.
-    Otherwise the Logger class is mostly a wrapper around the standard python
-    logging module.
-
-    For example:
-        from sivkit import get_logger
-
-        log = get_logger(__name__)
-        log.info('Got logger')
-
-        @log.traced
-        def traced_function(foo):
-            if not foo:
-                log.error('foo is falsy')
-                return False
-            return True
-    """
-    return Logger(name)
+    return decorator

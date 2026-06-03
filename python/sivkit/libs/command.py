@@ -1,8 +1,9 @@
+import logging
 from typing import Callable
 
 import sivkit
 
-log = sivkit.get_logger(__name__)
+log = logging.getLogger(__name__)
 
 
 class Command:
