@@ -1,7 +1,7 @@
-# Sivkit
+# SivKit
 The library is experimental and subject to API changes.
 
-Sivkit provides shared infrastructure for building apps in Python and TypeScript. It's not a GUI framework — it provides entities, stores, actions, and channels, while leaving view/state binding to the platform (Qt, React+MobX, etc.).
+SivKit provides shared infrastructure for building apps in Python and TypeScript. It's not a GUI framework — it provides entities, stores, actions, and channels, while leaving view/state binding to the platform (Qt, React+MobX, etc.).
 
 Used in [Pamet](https://github.com/v-ko/pamet) (React+MobX web app, Qt WebEngine desktop) and vii-assistant (Python+Qt, not yet published).
 
