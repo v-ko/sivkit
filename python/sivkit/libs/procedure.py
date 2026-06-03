@@ -22,11 +22,10 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import logging
 from typing import Any, Callable, Coroutine, Self
 
-from sivkit.logging import get_logger
-
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 
 class Task(asyncio.Task):

@@ -7,20 +7,20 @@ history.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from sivkit import get_logger
 from sivkit.storage.commit import Commit, CommitMetadata
 from sivkit.storage.delta import Delta
 from sivkit.storage.hash_tree import HashTree, build_hash_tree, update_hash_tree
 from sivkit.storage.in_memory_store import InMemoryStore
 from sivkit.storage.vcs_adapter import InternalRepoUpdate, VcsAdapter
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 
 def _replay_to(commits: list[Commit], end_index: int) -> InMemoryStore:

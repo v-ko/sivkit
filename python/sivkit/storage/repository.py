@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from sivkit import get_logger
+import logging
+
 from sivkit.libs.model import Entity
 from sivkit.storage.commit import Commit
 from sivkit.storage.commit_graph import BranchMetadata, CommitGraph
@@ -16,7 +17,7 @@ from sivkit.storage.in_memory_vcs_adapter import InMemoryVcsAdapter
 from sivkit.storage.vcs_adapter import InternalRepoUpdate, VcsAdapter
 from sivkit.util import get_new_id
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 
 class RepositoryIntegrityError(Exception):

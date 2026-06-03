@@ -26,15 +26,14 @@ from __future__ import annotations
 import asyncio
 import asyncio.events
 import inspect
+import logging
 import time
 from typing import Optional
 
 from PySide6.QtCore import QObject, QSocketNotifier, Signal, Slot
 from PySide6.QtWidgets import QApplication
 
-from sivkit.logging import get_logger
-
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 
 def _fileno(fd) -> int:

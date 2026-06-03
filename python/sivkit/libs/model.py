@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Type, TypeVar, dataclass_transform
 
 import attrs
 
 import sivkit
-from sivkit.logging import get_logger
 from sivkit.util import get_new_id
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 _EntityT = TypeVar("_EntityT", bound="Entity")
 entity_library = {}

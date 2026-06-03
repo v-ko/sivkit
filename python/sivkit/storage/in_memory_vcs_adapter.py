@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from sivkit import get_logger
+import logging
+
 from sivkit.storage.commit import Commit
 from sivkit.storage.commit_graph import CommitGraph
 from sivkit.storage.vcs_adapter import InternalRepoUpdate, VcsAdapter
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 
 class InMemoryVcsAdapter(VcsAdapter):

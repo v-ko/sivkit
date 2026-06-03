@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from typing import Any, Generator
 
-from sivkit import get_logger
 from sivkit.storage.change import Change, ChangeData, ChangeTypes
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 # {entity_id: [entity_id, reverse_component, forward_component]}
 DeltaData = dict[str, ChangeData]
