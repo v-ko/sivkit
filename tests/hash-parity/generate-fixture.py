@@ -332,10 +332,10 @@ def generate_fuzz_fixture(seed: int, entity_count: int, delta_count: int) -> dic
 
 def export_from_db(db_path: str, branch: str = "main") -> dict:
     """Export entities from a SQLite VCS database by replaying all commits."""
-    from fusion.libs.model import dump_to_dict
-    from fusion.storage.delta import Delta
-    from fusion.storage.in_memory_store import InMemoryStore
-    from fusion.storage.sqlite_vcs_adapter import SqliteVcsAdapter
+    from sivkit.libs.model import dump_to_dict
+    from sivkit.storage.delta import Delta
+    from sivkit.storage.in_memory_store import InMemoryStore
+    from sivkit.storage.sqlite_vcs_adapter import SqliteVcsAdapter
 
     adapter = SqliteVcsAdapter(Path(db_path))
     graph = adapter.get_commit_graph()

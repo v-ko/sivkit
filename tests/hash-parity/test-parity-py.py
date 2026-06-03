@@ -18,10 +18,10 @@ from pathlib import Path
 
 import attrs
 
-from fusion.libs.model import Entity, entity_type, load_from_dict
-from fusion.storage.delta import Delta
-from fusion.storage.hash_tree import build_hash_tree, update_hash_tree
-from fusion.storage.in_memory_store import InMemoryStore
+from sivkit.libs.model import Entity, entity_type, load_from_dict
+from sivkit.storage.delta import Delta
+from sivkit.storage.hash_tree import build_hash_tree, update_hash_tree
+from sivkit.storage.in_memory_store import InMemoryStore
 
 # ── Test entity types (minimal, matching the fixture schema) ──
 

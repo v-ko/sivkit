@@ -1,13 +1,13 @@
-# Fusion
+# Sivkit
 The library is experimental and subject to API changes.
 
-Fusion provides shared infrastructure for building apps in Python and TypeScript. It's not a GUI framework — it provides entities, stores, actions, and channels, while leaving view/state binding to the platform (Qt, React+MobX, etc.).
+Sivkit provides shared infrastructure for building apps in Python and TypeScript. It's not a GUI framework — it provides entities, stores, actions, and channels, while leaving view/state binding to the platform (Qt, React+MobX, etc.).
 
 Used in [Pamet](https://github.com/v-ko/pamet) (React+MobX web app, Qt WebEngine desktop) and vii-assistant (Python+Qt, not yet published).
 
 ## Installation
-- Python: `pip install python-fusion`
-- TypeScript: the `fusion/` package is used as a local dependency (see `js-src/`)
+- Python: `pip install sivkit`
+- TypeScript: the `sivkit/` package is used as a local dependency (see `typescript/`)
 
 ## Architecture
 
@@ -40,7 +40,7 @@ Below is a condensed but complete picture: entity, view state, store+reducer wir
 
 ```typescript
 // --- 1. Entity definition (fusion) ---
-import { entityType, Entity, EntityData, getEntityId } from "fusion/model/Entity";
+import { entityType, Entity, EntityData, getEntityId } from "sivkit/model/Entity";
 
 interface TodoData extends EntityData {
     text: string;
@@ -54,7 +54,7 @@ class Todo extends Entity<TodoData> {
 }
 
 
-// --- 2. View state (MobX — app-level, not part of fusion) ---
+// --- 2. View state (MobX — app-level, not part of sivkit) ---
 import { observable, makeObservable, ObservableMap } from "mobx";
 
 class TodoViewState {
@@ -76,8 +76,8 @@ class AppViewState {
 
 
 // --- 3. Store + reducer wiring ---
-import { InMemoryStore } from "fusion/storage/domain-store/InMemoryStore";
-import { Delta } from "fusion/model/Delta";
+import { InMemoryStore } from "sivkit/storage/domain-store/InMemoryStore";
+import { Delta } from "sivkit/model/Delta";
 
 const store = new InMemoryStore();
 const appState = new AppViewState();
@@ -99,7 +99,7 @@ store.onChanges = (delta: Delta) => {
 
 
 // --- 4. Actions ---
-import { action, registerRootActionCompletedHook } from "fusion/registries/Action";
+import { action, registerRootActionCompletedHook } from "sivkit/registries/Action";
 
 class TodoActions {
     @action
@@ -148,7 +148,7 @@ The same pattern applies in Python/Qt — entities and stores are the same, view
 
 ```python
 # --- View state ---
-from fusion.platform.qt_widgets import Property
+from sivkit.platform.qt_widgets import Property
 from PySide6.QtCore import QObject, Signal
 
 class CounterViewState(QObject):
@@ -170,7 +170,7 @@ class CounterViewState(QObject):
         self.count_changed.emit(value)
 
 # --- Action ---
-from fusion.libs.action import action
+from sivkit.libs.action import action
 
 @action("counter.increment")
 def increment(state: CounterViewState, amount: int = 1):
@@ -319,7 +319,7 @@ Procedures are the async counterpart to actions. Actions are synchronous and mut
 The Qt-asyncio integration must be installed before any procedure can run. This happens automatically when using `QtMainLoop`:
 
 ```python
-from fusion.platform.qt_widgets.qt_main_loop import QtMainLoop
+from sivkit.platform.qt_widgets.qt_main_loop import QtMainLoop
 
 app = QApplication(sys.argv)
 main_loop = QtMainLoop(app)  # installs the async event loop
@@ -331,8 +331,8 @@ Under the hood, `QtAsyncEventLoop` integrates asyncio into Qt's event loop via `
 ### Usage
 
 ```python
-from fusion import procedure
-from fusion.libs.action import action
+from sivkit import procedure
+from sivkit.libs.action import action
 
 @action('update_shapes')
 def update_shapes(overlay, shapes):
@@ -352,8 +352,8 @@ Calling a `@procedure` function schedules it as a Task and returns the Task imme
 Procedures return a `Task` subclass with fluent Promise-like methods for handling results and errors:
 
 ```python
-from fusion.libs.procedure import procedure
-from fusion.libs.action import action
+from sivkit.libs.procedure import procedure
+from sivkit.libs.action import action
 
 @action('show_data')
 def show_data(view_state, data):
@@ -427,4 +427,4 @@ Inside of a vertical generally all access is permitted, given that we try to kee
 
 Views receive user input. They should freely access actions. Also via the facade they can access services. Since ViewStates are the source of truth for the display - views should have access to the whole view state vertical via the facade. But altering the view-states directly is prohibited.
 
-Actions should not touch views. They are the only place view-states are altered. Optimally actions would receive the view states that they work with via argument (though in practice that's not enforced yet). Actions have domain-store access, and should also be the only place domain-store changes are made. The reason for that is that we wire domain-store changes to projector functions, which make view-state changes to reflect domain changes in the view layer. 
+Actions should not touch views. They are the only place view-states are altered. Optimally actions would receive the view states that they work with via argument (though in practice that's not enforced yet). Actions have domain-store access, and should also be the only place domain-store changes are made. The reason for that is that we wire domain-store changes to projector functions, which make view-state changes to reflect domain changes in the view layer.
