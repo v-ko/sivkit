@@ -347,11 +347,54 @@ async def run_experiment(facade):
 
 Calling a `@procedure` function schedules it as a Task and returns the Task immediately. It can be called from sync code (fire-and-forget) or awaited from other async code.
 
+### Task handling
+
+Procedures return a `Task` subclass with fluent Promise-like methods for handling results and errors:
+
+```python
+from fusion.libs.procedure import procedure
+from fusion.libs.action import action
+
+@action('show_data')
+def show_data(view_state, data):
+    view_state.data = data
+
+@action('show_spinner')
+def show_spinner(view_state, visible: bool):
+    view_state.spinner_visible = visible
+
+@procedure
+async def fetch_data(view_state, url: str) -> None:
+    show_spinner(view_state, True)
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        raise
+    finally:
+        show_spinner(view_state, False)
+    show_data(view_state, data)
+
+# In a ViewModel slot — fire-and-forget with error logging:
+def on_button_clicked(self):
+    fetch_data(self._state, "http://localhost:8000/api") \
+        .catch(lambda exc: log.error("Fetch failed: %s", exc))
+```
+
+- `.then(on_result)` — called with the return value on success
+- `.catch(on_exception)` — called with the exception on failure (not on cancel)
+- `.on_cancel(callback)` — called when the task is cancelled
+- `.finally_(callback)` — called regardless of outcome
+
+All methods return `self` for chaining. Actions are called inside the procedure around the async work — the call site only needs `.catch()` for logging unexpected failures.
+
 ### Guidelines
 
 - **Single thread**: Procedures run on the Qt main thread. No locks needed between procedures and actions.
 - **Actions inside procedures**: Call actions normally — they execute synchronously at the `await` yield points.
-- **Fire-and-forget**: Call from a Qt slot or callback — the Task runs in the background. Unhandled exceptions are logged automatically.
+- **Fire-and-forget**: Call from a Qt slot or callback — the Task runs in the background. Use `.catch()` to handle errors.
 - **Awaitable**: From other async code, `await my_procedure()` to get the result.
 - **Futures for external events**: Create an `asyncio.Future`, store it, `await` it. Resolve it from a callback (e.g. store change handler). This bridges event-driven callbacks into linear async flow.
 
@@ -371,3 +414,17 @@ def on_store_change(self, change):
 
 # Model library
 Entity constraints: serialization is done 3 levels deep. So note.content.image.width is good. But any deeper than that is out of scope. Diffing is done 1 level deep. So when you change the image.width - the setter method should swap the content object.
+
+
+# Projections
+When domain objects change (e.g. the Note object's text is changed) - we want to have a *projection* to translate that change from the domain model to the view model. So e.g. if a page is open and a note is deleted - the projector function removes the view state for that note and the view layer reacts accordingly to disappear the note.
+
+ * Reactions - if we find ourselves in need of doing view state updates based on other viewstate changes - we probably need a projector from the source domain state. Reactions are an antipattern
+
+
+## Allowed vertical dependencies
+Inside of a vertical generally all access is permitted, given that we try to keep it sane - hierarchical organization is important to avoid unnecessary spaghettification. So an action can call any other action. A view can access any other view. Same for ViewStates.
+
+Views receive user input. They should freely access actions. Also via the facade they can access services. Since ViewStates are the source of truth for the display - views should have access to the whole view state vertical via the facade. But altering the view-states directly is prohibited.
+
+Actions should not touch views. They are the only place view-states are altered. Optimally actions would receive the view states that they work with via argument (though in practice that's not enforced yet). Actions have domain-store access, and should also be the only place domain-store changes are made. The reason for that is that we wire domain-store changes to projector functions, which make view-state changes to reflect domain changes in the view layer. 

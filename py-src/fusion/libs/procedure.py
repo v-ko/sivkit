@@ -22,39 +22,85 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+from typing import Any, Callable, Coroutine, Self
 
 from fusion.logging import get_logger
 
 log = get_logger(__name__)
 
 
-def _log_task_exception(task: asyncio.Task) -> None:
-    """Done-callback that logs unhandled exceptions from procedure tasks."""
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        log.error(
-            "Unhandled exception in procedure '%s'",
-            task.get_name(),
-            exc_info=(type(exc), exc, exc.__traceback__),
-        )
+class Task(asyncio.Task):
+    """Task subclass with fluent Promise-like error handling.
+
+    Usage::
+
+        fetch_data(url) \\
+            .then(lambda result: update_ui(result)) \\
+            .catch(lambda exc: log.error("Failed: %s", exc)) \\
+            .on_cancel(lambda: log.warning("Cancelled")) \\
+            .finally_(lambda: spinner.hide())
+    """
+
+    def then(self, on_result: Callable[[Any], Any]) -> Self:
+        """Called with the return value when the task succeeds."""
+
+        def _done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                return
+            if t.exception() is not None:
+                return
+            on_result(t.result())
+
+        self.add_done_callback(_done)
+        return self
+
+    def catch(self, on_exception: Callable[[Exception], Any]) -> Self:
+        """Called with the exception when the task fails (not on cancel)."""
+
+        def _done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                on_exception(exc)
+
+        self.add_done_callback(_done)
+        return self
+
+    def on_cancel(self, callback: Callable[[], Any]) -> Self:
+        """Called when the task is cancelled."""
+
+        def _done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                callback()
+
+        self.add_done_callback(_done)
+        return self
+
+    def finally_(self, callback: Callable[[], Any]) -> Self:
+        """Called regardless of outcome (success, exception, or cancel)."""
+
+        def _done(t: asyncio.Task) -> None:
+            callback()
+
+        self.add_done_callback(_done)
+        return self
 
 
-def procedure(fn):
+def procedure(fn: Callable[..., Any]) -> Callable[..., Task]:
     """Decorator: auto-schedule an async function as an asyncio Task.
 
     When called, the coroutine is immediately scheduled on the running
     event loop and the Task is returned.  Can be awaited from async code
     or used fire-and-forget from synchronous Qt slots.
 
-    Unhandled exceptions are logged automatically.
+    Clients are expected to define their own exception handling.
     """
     if not inspect.iscoroutinefunction(fn):
         raise TypeError(f"@procedure can only decorate async functions, got {fn!r}")
 
     @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args, **kwargs) -> Task:
         coro = fn(*args, **kwargs)
         try:
             loop = asyncio.get_running_loop()
@@ -64,8 +110,7 @@ def procedure(fn):
                 "Ensure fusion.platform.qt_widgets.qt_event_loop.install() "
                 "has been called."
             ) from None
-        task = loop.create_task(coro, name=fn.__qualname__)
-        task.add_done_callback(_log_task_exception)
+        task = Task(coro, loop=loop, name=fn.__qualname__)
         return task
 
     wrapper._is_procedure = True
