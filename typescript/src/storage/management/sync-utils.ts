@@ -36,12 +36,10 @@ export async function autoMergeForSync(repo: Repository, localBranchName: string
      * in the sync procedure above (SyncUtils.ts)
      */
     log.info("Auto-merging for sync")
-    let changesMade = false
     let commitGraph = await repo.getCommitGraph()
     let branches = commitGraph.branches()
 
     let localBranchCommits = commitGraph.branchCommits(localBranchName)
-    let otherBranches = branches.filter(b => b.name !== localBranchName)
 
     let seniorityMap = new Map<string, number>()
     branches.forEach((b, i) => seniorityMap.set(b.name, i))
@@ -154,10 +152,9 @@ export async function autoMergeForSync(repo: Repository, localBranchName: string
                         // Drop only keys that are present in the dominant
                         let dominantEntityDelta = dominantDelta.changeData(entityId)! // is in dominantDelta.entityIds
                         for (let key of Object.keys(dominantEntityDelta[0])) {
-                            let entId: string;
                             let forwardLC: any; // To avoid TS error
                             let reverseLC: any;
-                            [entId, forwardLC, reverseLC] = localChange.data // components of the local entity delta
+                            [, forwardLC, reverseLC] = localChange.data // components of the local entity delta
                             if (Object.prototype.hasOwnProperty.call(forwardLC, key)) {
                                 delete forwardLC[key];
                                 delete reverseLC[key];

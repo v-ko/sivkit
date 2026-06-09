@@ -409,7 +409,6 @@ export async function buildHashTree(store: Store): Promise<HashTree> {
 }
 
 export async function updateHashTree(tree: HashTree, store: Store, delta: Delta) {
-    let t0 = performance.now();
     // For deletions - remove the node
     for (let change of delta.changes()) {
         let changeType = change.type();
@@ -463,6 +462,4 @@ export async function updateHashTree(tree: HashTree, store: Store, delta: Delta)
         }
     }
     await tree.updateRootHash();
-    let t1 = performance.now();
-    // log.info(`Hash tree updated in ${t1 - t0} ms`);
 }

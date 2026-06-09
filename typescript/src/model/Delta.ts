@@ -284,24 +284,3 @@ export function squashDeltas(deltas: DeltaData[]) {
 
     return squashedDelta;
 }
-
-function changeTypeFromData(
-    entityDelta: ChangeData,
-    reverse: boolean = false
-): ChangeType {
-    const [_, reverseDelta, forwardDelta] = entityDelta;
-    const [componentToCheck, otherComponent] = reverse ? [forwardDelta, reverseDelta] : [reverseDelta, forwardDelta];
-
-    const forwardPresent = Object.keys(otherComponent).length > 0;
-    const reversePresent = Object.keys(componentToCheck).length > 0;
-
-    if (forwardPresent && reversePresent) {
-        return ChangeType.UPDATE;
-    } else if (forwardPresent) {
-        return ChangeType.CREATE;
-    } else if (reversePresent) {
-        return ChangeType.DELETE;
-    } else {
-        return ChangeType.EMPTY;
-    }
-}

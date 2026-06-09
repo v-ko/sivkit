@@ -5,12 +5,10 @@ import { getLogger } from "../../logging";
 const log = getLogger('CacheFileStoreAdapter');
 
 export class CacheFileStoreAdapter implements FileStoreAdapter {
-  private _projectId: string;
   private _cacheName: string;
   private _cache: Cache | null = null;
 
   constructor(projectId: string) {
-    this._projectId = projectId;
     this._cacheName = `pamet-file-${projectId}`;
   }
 

@@ -90,7 +90,7 @@ export abstract class Store {
     protected _loaded: boolean = false;
 
     /** Load initial data into an empty (or cleared) store. Can only be called once, or again after clear(). */
-    loadData(entities: Entity<EntityData>[], origin?: string): Delta {
+    loadData(entities: Entity<EntityData>[], _origin?: string): Delta {
         if (this._loaded) {
             throw new Error('Store already has data loaded. Call clear() before loading again.');
         }

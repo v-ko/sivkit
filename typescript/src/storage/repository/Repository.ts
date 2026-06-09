@@ -98,7 +98,6 @@ export async function getVcsAdapter(config: VcsAdapterConfig): Promise<VcsAdapte
 
 export class Repository {
     _vcsAdapter: VcsAdapter;
-    private _adapterConfig: VcsAdapterConfig;
     private _isCaching: boolean;
 
     _currentBranch: string;
@@ -114,7 +113,6 @@ export class Repository {
 
         this._vcsAdapter = storageAdapter;
         this._isCaching = enableCaching;
-        this._adapterConfig = adapterConfig;
         this._currentBranch = adapterConfig.args.localBranchName;
 
         // Initialize the commit graph and head store

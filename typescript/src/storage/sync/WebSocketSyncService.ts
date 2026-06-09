@@ -63,7 +63,6 @@ export class WebSocketSyncService implements StoreSyncService {
     private _protocols: string[] | undefined;
     private _seq: number = 0;
     private _pendingAcks: Map<number, PendingAck> = new Map();
-    private _disposed = false;
 
     constructor(config: WebSocketSyncServiceConfig) {
         this._role = config.role;
@@ -134,7 +133,6 @@ export class WebSocketSyncService implements StoreSyncService {
             };
 
             ws.onclose = () => {
-                this._disposed = true;
                 // Reject all pending ACKs
                 for (const [, entry] of this._pendingAcks) {
                     clearTimeout(entry.timer);
@@ -177,7 +175,6 @@ export class WebSocketSyncService implements StoreSyncService {
     }
 
     dispose(): void {
-        this._disposed = true;
         if (this._ws) {
             this._ws.close();
             this._ws = null;

@@ -122,16 +122,16 @@ export const action: IActionDecorator = function (...args: any[]): any {
     // Check if it's being used as a decorator (without arguments)
     // console.log(`action decorator called with args: ${args}`)
     if (args.length === 3 && typeof args[0] === 'object') { // Normal method
-        const [target, key, descriptor] = args as [Object, string | symbol, PropertyDescriptor];
+        const [_target, key, descriptor] = args as [Object, string | symbol, PropertyDescriptor];
         return processMethod(descriptor, key.toString(), 'user');
     } else if (args.length === 3 && typeof args[0] === 'function') { // Static method
-        const [target, key, descriptor] = args as [Function, string | symbol, PropertyDescriptor];
+        const [_target, key, descriptor] = args as [Function, string | symbol, PropertyDescriptor];
         return processMethod(descriptor, key.toString(), 'user');
     } else if (args.length === 1 && typeof args[0] === 'object') {
         // There's an options dict supplied, which holds the named parameters
         const [options] = args as [{ name?: string, issuer?: string }];
 
-        return function (target: Object, key: string | symbol, descriptor: PropertyDescriptor): PropertyDescriptor {
+        return function (_target: Object, key: string | symbol, descriptor: PropertyDescriptor): PropertyDescriptor {
             const name = options.name || key.toString();
             const issuer = options.issuer || 'user';
             return processMethod(descriptor, name, issuer);

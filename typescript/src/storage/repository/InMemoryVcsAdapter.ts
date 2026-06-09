@@ -1,9 +1,6 @@
 import { Commit } from "../version-control/Commit";
 import { CommitGraph } from "../version-control/CommitGraph";
-import { getLogger } from "../../logging";
 import { VcsAdapter, InternalRepoUpdate } from "./VcsAdapter";
-
-const log = getLogger('InMemoryRepository')
 
 
 export class InMemoryVcsAdapter implements VcsAdapter {

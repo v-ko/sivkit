@@ -1,8 +1,5 @@
 import { Change, ChangeType } from "./Change";
-import { getLogger } from "../logging";
 import { createId } from "../util/base";
-
-const log = getLogger('entity.ts');
 
 // Library related variables and functions
 let entityLibrary: { [key: string]: typeof Entity<any> } = {};

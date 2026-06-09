@@ -1,10 +1,7 @@
 import type { DeltaData } from "../../model/Delta";
 import type { SerializedEntityData } from "../../model/Entity";
-import { getLogger } from "../../logging";
 import { buildRestApiAuthHeaders, RestApiAuthConfig } from "../rest-api/Auth";
 import type { DomainStoreAdapter } from "./DomainStoreAdapter";
-
-const log = getLogger('RestApiDomainStoreAdapter');
 
 /**
  * Domain store adapter that talks to a backend REST API.

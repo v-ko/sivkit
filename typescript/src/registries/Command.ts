@@ -10,7 +10,7 @@ let _commands: Map<string, Command> = new Map();  // By name
 
 // decorator to register a command
 export function command(title: string, enablement: string = '') {
-    return function (target: any, propertyKey: string, descriptor: PropertyDescriptor) {
+    return function (_target: any, propertyKey: string, descriptor: PropertyDescriptor) {
         let command: Command = {
             name: propertyKey,
             title: title,
