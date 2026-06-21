@@ -12,6 +12,7 @@ of how entities referencing the blobs are reorganized.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
 CONTENT_HASH_HEX_LEN = 32
@@ -27,10 +28,19 @@ class BlobStore:
     def __init__(self, root: Path) -> None:
         self._root = root
         self._root.mkdir(parents=True, exist_ok=True)
+        self._on_added_callbacks: list[Callable[[str, bytes], None]] = []
 
     @property
     def root(self) -> Path:
         return self._root
+
+    def add_on_added_callback(self, cb: Callable[[str, bytes], None]) -> None:
+        """Register a callback invoked when a new blob is added (not dedup)."""
+        self._on_added_callbacks.append(cb)
+
+    def remove_on_added_callback(self, cb: Callable[[str, bytes], None]) -> None:
+        """Remove a previously registered on_added callback."""
+        self._on_added_callbacks.remove(cb)
 
     def add(self, data: bytes, extension: str = "") -> str:
         """Store blob data, return the relative path (e.g. 'ab/ab3f…dead.jpg').
@@ -44,6 +54,8 @@ class BlobStore:
         if not abs_path.exists():
             abs_path.parent.mkdir(parents=True, exist_ok=True)
             abs_path.write_bytes(data)
+            for cb in self._on_added_callbacks:
+                cb(rel_path, data)
         return rel_path
 
     def get_path(self, rel_path: str) -> Path | None:

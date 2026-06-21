@@ -1,14 +1,24 @@
 """Minimal asyncio event loop integration with Qt.
 
-Provides QtAsyncEventLoop — an asyncio-compatible event loop that runs
-inside Qt's event loop on the main thread.  Scheduling uses QTimer,
-I/O readiness uses QSocketNotifier, and thread-safe callbacks use Qt
-signals.
+Based on qasync (https://github.com/CabbageDevelopment/qasync), which is
+a fork of asyncqt by Gerard Marull-Paretas, itself a fork of quamash by
+Mark Harviston and Arve Knudsen.  All three are BSD-2-Clause licensed.
 
-This gives async/await support on the Qt main thread without any
-third-party dependency.  Procedures (async functions) can freely read
-Qt state, call actions, and await I/O — all single-threaded, same as
-JavaScript.
+This is a simplified reimplementation of the core approach: QTimer for
+scheduling, QSocketNotifier for I/O readiness, and Qt signals for
+thread-safe callbacks — without multi-Qt-flavor detection, QThreadExecutor,
+or the debug/logging infrastructure of the original.
+
+Original copyright notices:
+    Copyright (c) 2018 Gerard Marull-Paretas <gerard@teslabs.com>
+    Copyright (c) 2014 Mark Harviston <mark.harviston@gmail.com>
+    Copyright (c) 2014 Arve Knudsen <arve.knudsen@gmail.com>
+
+Provides QtAsyncEventLoop — an asyncio-compatible event loop that runs
+inside Qt's event loop on the main thread.  This gives async/await support
+on the Qt main thread without any third-party dependency.  Procedures
+(async functions) can freely read Qt state, call actions, and await I/O —
+all single-threaded, same as JavaScript.
 
 Usage::
 
