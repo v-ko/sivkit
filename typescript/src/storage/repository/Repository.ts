@@ -1,7 +1,7 @@
 import { getLogger } from "../../logging";
 import { Commit, CommitData } from "../version-control/Commit";
 import { CommitGraph, CommitGraphData } from "../version-control/CommitGraph";
-import { VcsAdapter, InternalRepoUpdate } from "./VcsAdapter";
+import { VcsAdapter, InternalRepoUpdate, CorruptVcsStoreError } from "./VcsAdapter";
 import { inferRepoChangesFromGraphs, sanityCheckAndHydrateInternalRepoUpdate } from "../management/sync-utils";
 import { Delta, DeltaData, squashDeltas } from "../../model/Delta";
 import { createId } from "../../util/base";
@@ -36,6 +36,8 @@ export class MissingBranchError extends Error {
         this.name = "MissingBranchError";
     }
 }
+
+export { CorruptVcsStoreError };
 
 export interface VcsAdapterArgs {
     projectId: string;
@@ -161,34 +163,45 @@ export class Repository {
         }
 
         // (ONLY IF CACHING ENABLED)
-        if (headStoreData) {
-            // Populate headStore from provided entity data (e.g. domain store)
-            for (const entity of headStoreData) {
-                repo.headStore.insertOne(entity);
-            }
-            log.info(`Populated headStore from provided data: ${headStoreData.length} entities`);
-            repo._hashTree = await buildHashTree(repo.headStore);
+        try {
+            if (headStoreData) {
+                // Populate headStore from provided entity data (e.g. domain store)
+                for (const entity of headStoreData) {
+                    repo.headStore.insertOne(entity);
+                }
+                log.info(`Populated headStore from provided data: ${headStoreData.length} entities`);
+                repo._hashTree = await buildHashTree(repo.headStore);
 
-            // Populate the commit graph cache from the adapter so that
-            // getCommitGraph() returns the real graph (needed by sync/OPSS).
-            // Without this, the cached graph stays empty and sync sees no
-            // commits to replay, leaving the main-thread store empty.
-            const adapterCommitIds = allCommits.map(c => c.id);
-            const fullCommits = adapterCommitIds.length > 0
-                ? await repo._vcsAdapter.getCommits(adapterCommitIds)
-                : [];
-            for (const commit of fullCommits) {
-                repo._commitById.set(commit.id, commit);
-                repo._commitGraph.addCommit(commit.metadata());
+                // Populate the commit graph cache from the adapter so that
+                // getCommitGraph() returns the real graph (needed by sync/OPSS).
+                // Without this, the cached graph stays empty and sync sees no
+                // commits to replay, leaving the main-thread store empty.
+                const adapterCommitIds = allCommits.map(c => c.id);
+                const fullCommits = adapterCommitIds.length > 0
+                    ? await repo._vcsAdapter.getCommits(adapterCommitIds)
+                    : [];
+                for (const commit of fullCommits) {
+                    repo._commitById.set(commit.id, commit);
+                    repo._commitGraph.addCommit(commit.metadata());
+                }
+                for (const branch of allBranches) {
+                    repo._commitGraph.setBranch(branch.name, branch.head_commit_id);
+                }
+            } else {
+                // Initialize an empty hash tree before hydration so
+                // _applyInternalUpdateToCache can update it incrementally.
+                repo._hashTree = await buildHashTree(repo.headStore);
+                await repo.hydrateCacheFromVcsAdapter();
             }
-            for (const branch of allBranches) {
-                repo._commitGraph.setBranch(branch.name, branch.head_commit_id);
+        } catch (e) {
+            // Corruption is not recoverable in place. Close the adapter connection
+            // so the caller's rebuild (deleteDB) is not blocked, then propagate
+            // the typed error for the policy layer to handle.
+            if (e instanceof CorruptVcsStoreError) {
+                log.error('VCS store corrupt during cache hydration; closing adapter for rebuild', e);
+                repo._vcsAdapter.close();
             }
-        } else {
-            // Initialize an empty hash tree before hydration so
-            // _applyInternalUpdateToCache can update it incrementally.
-            repo._hashTree = await buildHashTree(repo.headStore);
-            await repo.hydrateCacheFromVcsAdapter();
+            throw e;
         }
 
         log.info(`Repository opened with caching enabled. Using VCS adapter: ${config.name}`);

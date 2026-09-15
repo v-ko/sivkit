@@ -1,4 +1,4 @@
-import { getVcsAdapter, Repository, RepositoryIntegrityError, MissingBranchError, VcsAdapterConfig, verifyRepositoryIntegrity } from "../repository/Repository";
+import { getVcsAdapter, Repository, RepositoryIntegrityError, MissingBranchError, CorruptVcsStoreError, VcsAdapterConfig, verifyRepositoryIntegrity } from "../repository/Repository";
 import { FileStoreAdapter } from "../file-store/FileStoreAdapter";
 import { InMemoryFileStoreAdapter } from "../file-store/InMemoryFileStoreAdapter";
 import { CacheFileStoreAdapter } from "../file-store/CacheFileStoreAdapter";
@@ -211,6 +211,27 @@ export class ProjectStorageManager {
                 if (headStoreData.length > 0) {
                     const initialDelta = Delta.fromChanges(headStoreData.map(e => Change.create(e)));
                     await this._onDeviceRepo.commit(initialDelta, 'Initial commit from domain store');
+                }
+            } else if (e instanceof CorruptVcsStoreError) {
+                // Version history is physically damaged and cannot be recovered in
+                // place (e.g. after an unclean shutdown). Discard it and rebuild.
+                log.error('VCS store corrupt; discarding and rebuilding local version history', e);
+                const adapter = await getVcsAdapter(this.config.onDeviceVcsAdapter);
+                await adapter.eraseStorage();
+                this._onDeviceRepo = await Repository.create(this.config.onDeviceVcsAdapter, true);
+                if (headStoreData && headStoreData.length > 0) {
+                    // HEAD survives outside the VCS (domain store): rebuild is lossless.
+                    const initialDelta = Delta.fromChanges(headStoreData.map(e => Change.create(e)));
+                    await this._onDeviceRepo.commit(initialDelta, 'Rebuild after VCS corruption');
+                    this._parentStorageService?.reportError(
+                        'The local version history was damaged (likely due to an unclean shutdown) and has been rebuilt from the current project data. No data was lost, but commit history is gone.'
+                    );
+                } else {
+                    // No HEAD source available (e.g. local-only web): the store had to
+                    // be reset. Unsynced changes may be lost.
+                    this._parentStorageService?.reportError(
+                        'The local version history was damaged (likely due to an unclean shutdown) and could not be recovered. The project has been reset. Unsynced changes may have been lost.'
+                    );
                 }
             } else {
                 if (e instanceof RepositoryIntegrityError) {

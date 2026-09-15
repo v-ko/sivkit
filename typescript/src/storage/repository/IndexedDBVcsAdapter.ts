@@ -1,6 +1,6 @@
 import { Commit, CommitMetadataData } from "../version-control/Commit";
 import { openDB, DBSchema, IDBPDatabase, deleteDB } from 'idb';
-import { VcsAdapter, BranchMetadata, InternalRepoUpdate } from "./VcsAdapter";
+import { VcsAdapter, BranchMetadata, InternalRepoUpdate, CorruptVcsStoreError } from "./VcsAdapter";
 import { DeltaData } from "../../model/Delta";
 import { CommitGraph } from "../version-control/CommitGraph";
 import { DebugConnectionTracker, wrapDbWithTransactionDebug } from "../management/DebugUtils";
@@ -10,6 +10,20 @@ import { getLogger } from "../../logging";
 let log = getLogger('IndexedDBVcsAdapter');
 
 const DEBUG_DB = false;
+
+// IndexedDB 3.0 DOMException names that indicate the stored value could not be
+// read from the underlying storage (physical corruption / IO fault), as opposed
+// to logic or usage errors.
+const CORRUPTION_ERROR_NAMES = new Set(['NotReadableError', 'UnknownError']);
+
+function isCorruptionError(error: unknown): boolean {
+    return (
+        typeof error === 'object' &&
+        error !== null &&
+        typeof (error as { name?: unknown }).name === 'string' &&
+        CORRUPTION_ERROR_NAMES.has((error as { name: string }).name)
+    );
+}
 
 function repoStoreName(projectId: string) {
     return 'repoStore-' + projectId;
@@ -137,42 +151,72 @@ export class IndexedDBVcsAdapter implements VcsAdapter {
         }
 
         try {
-            const tx = this.db.transaction(['commits', 'deltas'], 'readonly');
-            const commitsStore = tx.objectStore('commits');
-            const deltasStore = tx.objectStore('deltas');
-
-            const commits: Commit[] = [];
-
-            for (const id of ids) {
-                try {
-                    const commitData = await commitsStore.get(id);
-                    if (commitData) {
-                        const delta = await deltasStore.get(commitData.id);
-                        if (delta) {
-                            // commitData.deltaData = delta.delta;
-                            commits.push(new Commit({...commitData, delta_data: delta.delta}));
-                        } else {
-                            log.error('Delta not found for commit ' + commitData.id);
-                        }
-                    } else {
-                        log.error('Commit not found for ID ' + id);
-                    }
-                } catch (requestError: any) { // You can use 'any' or 'unknown' here, then narrow with an instanceof check if necessary
-                    log.error('Error handling commit or delta request: ' + requestError.message);
-                    // Optionally check if (requestError instanceof DOMException) for more specific handling
-                }
-            }
-
-            await tx.done;
-            if (commits.length === 0 && ids.length > 0) {
-                log.warning('No commits found for the provided IDs', ids);
-            }
-
-            return commits;
-        } catch (txError: any) {
-            log.error('Transaction failed: ' + txError.message);
-            throw txError; // Rethrow or handle transaction error as per application need
+            // Fast path: read every commit + delta in one transaction.
+            return await this._readCommitsBatch(ids);
+        } catch (batchError: any) {
+            // A read failed and aborted the batch transaction. At the transaction
+            // level the error is often an ambiguous AbortError (IndexedDB 3.0
+            // §5.5: sibling requests of an aborted tx are set to AbortError), so
+            // re-read each commit in its own transaction to recover the real
+            // request-level error and classify physical corruption.
+            log.error('Batch commit read failed, diagnosing per-commit: ' + batchError?.message);
+            return this._diagnoseReadFailure(ids, batchError);
         }
+    }
+
+    private async _readCommitsBatch(ids: string[]): Promise<Commit[]> {
+        const tx = this.db.transaction(['commits', 'deltas'], 'readonly');
+        const commitsStore = tx.objectStore('commits');
+        const deltasStore = tx.objectStore('deltas');
+
+        const commits: Commit[] = [];
+        for (const id of ids) {
+            const commitData = await commitsStore.get(id);
+            if (!commitData) {
+                log.error('Commit not found for ID ' + id);
+                continue;
+            }
+            const delta = await deltasStore.get(commitData.id);
+            if (!delta) {
+                log.error('Delta not found for commit ' + commitData.id);
+                continue;
+            }
+            commits.push(new Commit({ ...commitData, delta_data: delta.delta }));
+        }
+
+        await tx.done;
+        if (commits.length === 0 && ids.length > 0) {
+            log.warning('No commits found for the provided IDs', ids);
+        }
+        return commits;
+    }
+
+    // Re-read each commit in isolation to find the request-level cause of a batch
+    // read failure. Always throws: CorruptVcsStoreError if a value is unreadable,
+    // any other (logic/usage) DOMException as-is, or originalError if every
+    // re-read unexpectedly succeeds (transient failure).
+    private async _diagnoseReadFailure(ids: string[], originalError: unknown): Promise<never> {
+        for (const id of ids) {
+            try {
+                const tx = this.db.transaction(['commits', 'deltas'], 'readonly');
+                const commitData = await tx.objectStore('commits').get(id);
+                if (commitData) {
+                    await tx.objectStore('deltas').get(commitData.id);
+                }
+                await tx.done;
+            } catch (requestError: unknown) {
+                if (isCorruptionError(requestError)) {
+                    const name = (requestError as { name: string }).name;
+                    log.error(`Corrupt VCS store: reading commit "${id}" failed with ${name}`);
+                    throw new CorruptVcsStoreError(
+                        `IndexedDB storage unreadable while reading commit "${id}" (${name})`,
+                        { commitId: id, cause: requestError }
+                    );
+                }
+                throw requestError;
+            }
+        }
+        throw originalError;
     }
 
     async applyUpdate(update: InternalRepoUpdate): Promise<void> {
