@@ -1,11 +1,11 @@
 """Server-side service for the store-sync protocol.
 
-Listens to store changes (via ``on_changes``) and tracks them with a
+Listens to store changes (via an on-changes callback) and tracks them with a
 monotonic seq counter and a delta ring buffer, broadcasting to SSE
 subscribers.
 
-The consumer wires this by chaining ``on_store_changes`` into the
-store's ``on_changes`` callback.
+The consumer wires this with
+``store.add_on_changes_callback(service.on_store_changes)``.
 
 This is the server-side counterpart to the TypeScript
 ``RestStoreSyncService`` in ``sivkit/typescript/src/storage/sync/``.
@@ -37,8 +37,8 @@ class StoreSyncService:
     * ``full_state()``       → ``GET  {endpoint}``
     * ``subscribe(after)``   → async generator of ``(seq, delta_data)`` tuples
 
-    Wire ``on_store_changes`` as (part of) the store's ``on_changes``
-    callback so that every mutation is automatically broadcast.
+    Register ``on_store_changes`` as a store on-changes callback so that
+    every mutation is automatically broadcast.
     """
 
     def __init__(self, store: InMemoryStore, buffer_size: int = 200) -> None:
@@ -55,7 +55,7 @@ class StoreSyncService:
     def on_store_changes(self, delta: Delta, origin: str | None = None) -> None:
         """Record a delta and notify all SSE subscribers.
 
-        Designed to be called from ``store.on_changes`` (synchronous).
+        Designed to be a store on-changes callback (synchronous).
         Subscriber queues are thread-safe for put_nowait from any thread.
         """
         delta_data = delta.asdict()

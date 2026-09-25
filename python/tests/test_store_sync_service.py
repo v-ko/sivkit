@@ -175,7 +175,7 @@ def test_subscribers_notified_on_store_change():
 
 
 def test_on_store_changes_called_via_on_changes():
-    """Verify on_store_changes gets called when store.on_changes fires."""
+    """Verify on_store_changes gets called as a store on-changes callback."""
     store, sss = _make_wired_store_and_sss()
 
     e = TestConfigEntity(id="e1", name="hello", value="world")

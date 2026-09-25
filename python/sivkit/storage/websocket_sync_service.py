@@ -32,10 +32,10 @@ Store interaction
 -----------------
 - Authority builds ``full_state`` via ``store.find()``.
 - Receiver hydrates via ``store.clear()`` + ``store.load_data()``.
-  ``load_data`` does **not** fire ``on_changes``, so only real
+  ``load_data`` does **not** fire the on-changes callbacks, so only real
   user-action deltas reach change listeners.
 - Both sides apply remote deltas with ``store.apply_delta(delta,
-  origin='remote')``.
+  origin='remote')``, inside a service action if the store requires one.
 
 Transport-agnostic: the caller supplies async ``send``/``receive``
 callables, so it works with any WebSocket library.
@@ -49,12 +49,19 @@ from collections.abc import Awaitable, Callable
 from enum import Enum
 from typing import Any
 
+from sivkit.libs.action import action
 from sivkit.libs.model import dump_to_dict, load_from_dict
 from sivkit.storage.base_store import Store
 from sivkit.storage.change import Change
 from sivkit.storage.delta import Delta, DeltaData
 
 log = logging.getLogger(__name__)
+
+
+@action("sync.apply_remote_delta", issuer="service")
+def _apply_remote_delta_in_action(store: Store, delta: Delta) -> None:
+    store.apply_delta(delta, origin="remote")
+
 
 # Type aliases for the transport callables.
 SendFn = Callable[[dict[str, Any]], Awaitable[None]]
@@ -332,7 +339,7 @@ class WebSocketSyncService:
                 )
         else:
             # Receiver: always apply remote deltas from authority
-            self._store.apply_delta(delta, origin="remote")
+            self._apply_remote(delta)
             await send({"type": "ack", "seq": remote_seq})
             self._seq = max(self._seq, remote_seq)
 
@@ -368,7 +375,7 @@ class WebSocketSyncService:
 
         # Apply the (possibly reduced) client delta
         if not transformed.is_empty():
-            self._store.apply_delta(transformed, origin="remote")
+            self._apply_remote(transformed)
 
         # ACK the client
         await send({"type": "ack", "seq": remote_seq})
@@ -477,6 +484,12 @@ class WebSocketSyncService:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _apply_remote(self, delta: Delta) -> None:
+        if self._store.require_action:
+            _apply_remote_delta_in_action(self._store, delta)
+        else:
+            self._store.apply_delta(delta, origin="remote")
 
     def _full_state_message(self) -> dict[str, Any]:
         entities = [dump_to_dict(e) for e in self._store.find()]

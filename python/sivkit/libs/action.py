@@ -1,8 +1,13 @@
 import functools
 import logging
 import time
+from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from sivkit.storage.base_store import Store
+    from sivkit.storage.delta import Delta
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +72,56 @@ _action_call_stack: list[ActionState] = []
 # Synchronous hook lists (matches TS _rootActionStartedHooks/_rootActionCompletedHooks)
 _root_action_started_hooks: list[Callable] = []
 _root_action_completed_hooks: list[Callable] = []
+
+
+@dataclass
+class DomainStoreChange:
+    """One store notification recorded during a root action."""
+
+    delta: "Delta"
+    origin: str | None
+    # The innermost action running when the change was committed.
+    action: ActionState
+
+
+RootActionChangesHandler = Callable[[ActionState, list[DomainStoreChange]], None]
+
+
+@dataclass
+class _ChangesRegistration:
+    store: "Store"
+    handler: RootActionChangesHandler
+    changes: list[DomainStoreChange]
+
+
+_changes_registrations: list[_ChangesRegistration] = []
+
+
+def register_root_action_changes_handler(
+    store: "Store", handler: RootActionChangesHandler
+) -> Callable[[], None]:
+    """Record the store's changes per root action and hand them to the handler
+    when the root action completes (called on every root action, with possibly
+    no changes). Sets ``store.require_action``, so changing the store outside an
+    action raises before the change. Returns an unregister function."""
+    log.info("register_root_action_changes_handler called")
+    registration = _ChangesRegistration(store, handler, [])
+
+    def callback(delta: "Delta", origin: str | None) -> None:
+        registration.changes.append(
+            DomainStoreChange(delta, origin, _action_call_stack[-1])
+        )
+
+    store.add_on_changes_callback(callback)
+    store.require_action = True
+    _changes_registrations.append(registration)
+
+    def unregister() -> None:
+        store.remove_on_changes_callback(callback)
+        _changes_registrations.remove(registration)
+        store.require_action = any(r.store is store for r in _changes_registrations)
+
+    return unregister
 
 
 def register_root_action_started_hook(hook: Callable):
@@ -143,8 +198,18 @@ def action(name: str, issuer: str = "user"):
             else:
                 action_state.duration = time.time() - action_state.start_time
 
-            # If root action — fire completed hooks synchronously
+            # If root action — fire the changes handlers, then the completed
+            # hooks, synchronously.
             if len(_action_call_stack) == 0:
+                for registration in list(_changes_registrations):
+                    changes = registration.changes
+                    registration.changes = []
+                    try:
+                        registration.handler(action_state, changes)
+                    except Exception:
+                        log.exception(
+                            f"Error in root action changes handler for {func_name}"
+                        )
                 for hook in _root_action_completed_hooks:
                     hook(action_state)
 

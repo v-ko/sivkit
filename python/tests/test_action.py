@@ -1,22 +1,33 @@
 import pytest
 
+from sivkit import Entity, entity_type
 from sivkit.libs.action import (
     ActionRunStates,
     _action_call_stack,
+    _changes_registrations,
     _root_action_completed_hooks,
     _root_action_started_hooks,
     action,
     check_in_action,
     is_in_action,
+    register_root_action_changes_handler,
     register_root_action_completed_hook,
     register_root_action_started_hook,
 )
+from sivkit.libs.model import dump_to_dict
+from sivkit.libs.projection import _projections, is_in_projection, register_projection
+from sivkit.storage.change import Change
+from sivkit.storage.delta import Delta
+from sivkit.storage.in_memory_store import InMemoryStore
+from sivkit.storage.websocket_sync_service import WebSocketSyncService
 
 
 def _clear_action_state():
     _action_call_stack.clear()
     _root_action_started_hooks.clear()
     _root_action_completed_hooks.clear()
+    _changes_registrations.clear()
+    _projections.clear()
 
 
 def test_action_runs_and_returns_value():
@@ -218,3 +229,145 @@ def test_started_before_body_completed_after():
 
     body()
     assert events == ["started", "body", "completed"]
+
+
+@entity_type
+class _ActionTestEntity(Entity):
+    name: str = ""
+
+
+def _create_delta(entity):
+    return Delta.from_changes([Change(entity.id, {}, dump_to_dict(entity))])
+
+
+def test_root_action_changes_handler():
+    _clear_action_state()
+    store = InMemoryStore()
+    calls, other, fired = [], [], []
+    unregister = register_root_action_changes_handler(
+        store, lambda root, changes: calls.append((root, changes))
+    )
+    unregister_other = register_root_action_changes_handler(
+        store, lambda root, changes: other.append(changes)
+    )
+    store.add_on_changes_callback(lambda d, o: fired.append(d))
+    a, b = _ActionTestEntity(), _ActionTestEntity()
+
+    # Outside an action: raises before altering the store; load_data is exempt
+    with pytest.raises(Exception, match="@action"):
+        store.insert_one(a)
+    with pytest.raises(Exception, match="@action"):
+        store.apply_delta(_create_delta(a))
+    assert store.find_one(id=a.id) is None and fired == []
+    store.load_data([_ActionTestEntity()])
+
+    @action("test.inner", issuer="service")
+    def inner():
+        store.insert_one(a)
+
+    @action("test.outer")
+    def outer():
+        inner()
+        store.apply_delta(_create_delta(b), origin="remote")
+
+    @action("test.noop")
+    def noop():
+        pass
+
+    outer()
+    noop()
+    root, changes = calls[0]
+    assert root.name == "[user]test.outer"
+    assert [(c.action.name, c.origin) for c in changes] == [
+        ("[service]test.inner", None),
+        ("[user]test.outer", "remote"),
+    ]
+    assert changes[1].delta.change(b.id).is_create()
+    assert calls[1][1] == [] and len(other) == 2
+
+    unregister_other()
+    assert store.require_action is True
+    unregister()
+    assert store.require_action is False
+    noop()
+    store.insert_one(_ActionTestEntity())
+    assert len(calls) == 2
+
+
+def test_throwing_callback_rolls_back_and_earlier_callbacks_see_the_revert():
+    _clear_action_state()
+    store = InMemoryStore()
+    calls = []
+    register_root_action_changes_handler(
+        store, lambda root, changes: calls.append((root, changes))
+    )
+
+    def _boom(_d, _o):
+        raise RuntimeError("listener failed")
+
+    store.add_on_changes_callback(_boom)
+    entity = _ActionTestEntity()
+
+    @action("test.rolled_back")
+    def insert():
+        store.insert_one(entity)
+
+    with pytest.raises(RuntimeError):
+        insert()
+    assert store.find_one(id=entity.id) is None
+    root, changes = calls[0]
+    merged = Delta()
+    for c in changes:
+        merged.merge_with_priority(c.delta.copy())
+    assert merged.change(entity.id) is None
+    assert root.run_state == ActionRunStates.FAILED
+
+
+def test_projection():
+    _clear_action_state()
+    store = InMemoryStore()
+    projected = []
+
+    def projector(delta, projected_store):
+        assert is_in_projection() and projected_store is store
+        projected.append(delta)
+
+    unregister = register_projection(store, projector)
+    with pytest.raises(Exception, match="already registered"):
+        register_projection(store, lambda d, s: None)
+    a, b = _ActionTestEntity(), _ActionTestEntity()
+
+    @action("test.insert_two")
+    def insert_two():
+        store.insert_one(a)
+        store.insert_one(b)
+
+    @action("test.noop")
+    def noop():
+        pass
+
+    insert_two()
+    noop()
+    assert sorted(projected[0].entity_ids()) == sorted([a.id, b.id])
+    assert projected[1].is_empty()
+
+    unregister()
+    register_projection(store, lambda d, s: None)
+
+
+def test_sync_remote_apply_is_in_action_only_when_required():
+    _clear_action_state()
+    store = InMemoryStore()
+    service = WebSocketSyncService(store, role="receiver")
+    first = _ActionTestEntity()
+    service._apply_remote(_create_delta(first))
+    assert store.find_one(id=first.id) is not None
+
+    roots = []
+    register_root_action_changes_handler(
+        store, lambda root, changes: roots.append(root)
+    )
+    second = _ActionTestEntity()
+    service._apply_remote(_create_delta(second))
+    assert store.find_one(id=second.id) is not None
+    assert [r.name for r in roots] == ["[service]sync.apply_remote_delta"]

@@ -138,9 +138,9 @@ describe("InMemoryStore", () => {
         expect(stored._data.name).toBe("Original");
         expect(stored).not.toBe(page);
 
-        // updateOne detects the diff and fires onChanges
+        // updateOne detects the diff and fires the callbacks
         const deltas: Delta[] = [];
-        store.onChanges = (d: Delta) => deltas.push(d);
+        store.addOnChangesCallback((d: Delta) => deltas.push(d));
         let change = store.updateOne(page);
         expect(change.isEmpty()).toBe(false);
         expect(deltas.length).toBe(1);

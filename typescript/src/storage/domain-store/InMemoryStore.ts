@@ -424,6 +424,7 @@ export class InMemoryStore extends Store {
     }
 
     insertOne(entity: Entity<EntityData>): Change {
+        if (!this._applyingInternally) this._assertInActionIfRequired();
         // console.log('Inserting entity', entity.id, entity.parentId, entity.constructor.name)
 
         // Check if entity already exists using the id index
@@ -434,21 +435,23 @@ export class InMemoryStore extends Store {
         }
 
         const change = this.upsertToCache(entity, true);
-        if (this.onChanges && !this._applyingInternally) {
-            this.onChanges(Delta.fromChanges([change]));
+        if (!this._applyingInternally) {
+            this._fireOnChangesWithRollback(Delta.fromChanges([change]));
         }
         return change;
     }
 
     updateOne(entity: Entity<EntityData>): Change {
+        if (!this._applyingInternally) this._assertInActionIfRequired();
         const change = this.upsertToCache(entity, false);
-        if (this.onChanges && !this._applyingInternally && !change.isEmpty()) {
-            this.onChanges(Delta.fromChanges([change]));
+        if (!this._applyingInternally && !change.isEmpty()) {
+            this._fireOnChangesWithRollback(Delta.fromChanges([change]));
         }
         return change;
     }
 
     removeOne(entity: Entity<EntityData>): Change {
+        if (!this._applyingInternally) this._assertInActionIfRequired();
         // Check if entity exists using the id index
         const { indexes } = this.indexManager.indexStorage;
         const idIndex = indexes.get("id");
@@ -460,8 +463,8 @@ export class InMemoryStore extends Store {
 
         this.removeFromCache(oldEntity);
         const change = Change.delete(entity);
-        if (this.onChanges && !this._applyingInternally) {
-            this.onChanges(Delta.fromChanges([change]));
+        if (!this._applyingInternally) {
+            this._fireOnChangesWithRollback(Delta.fromChanges([change]));
         }
         return change;
     }

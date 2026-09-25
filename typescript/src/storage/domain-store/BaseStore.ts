@@ -1,6 +1,7 @@
 import { Change } from "../../model/Change";
 import { Entity, EntityData, SerializedEntityData, dumpToDict, loadFromDict, transformedEntity } from "../../model/Entity";
 import { Delta } from "../../model/Delta";
+import { assertInAction } from "../../registries/Action";
 
 // a searchFilter is a dict, where there can be an id, a parent_id, a type or any other property
 export interface SearchFilter {
@@ -20,9 +21,59 @@ export class IrrationalStorageOperation extends Error {
     }
 }
 
+export type OnChangesCallback = (delta: Delta, origin?: string) => void;
+
 export abstract class Store {
-    onChanges: ((delta: Delta, origin?: string) => void) | null = null;
+    /** When set, notifying operations must run inside an action (checked before the change). */
+    requireAction: boolean = false;
     protected _applyingInternally: boolean = false;
+    private _onChangesCallbacks: OnChangesCallback[] = [];
+
+    /** Callbacks run synchronously, in registration order. */
+    addOnChangesCallback(callback: OnChangesCallback): void {
+        this._onChangesCallbacks.push(callback);
+    }
+
+    removeOnChangesCallback(callback: OnChangesCallback): void {
+        this._onChangesCallbacks = this._onChangesCallbacks.filter(c => c !== callback);
+    }
+
+    protected _assertInActionIfRequired(): void {
+        if (this.requireAction) {
+            assertInAction();
+        }
+    }
+
+    /**
+     * Fire the on-changes callbacks; if any throws, undo this call's changes,
+     * pass the reversed delta to the callbacks that already saw them, and
+     * rethrow. Atomicity across separate store calls is the caller's concern.
+     */
+    protected _fireOnChangesWithRollback(delta: Delta, origin?: string): void {
+        const notified: OnChangesCallback[] = [];
+        try {
+            for (const callback of [...this._onChangesCallbacks]) {
+                callback(delta, origin);
+                notified.push(callback);
+            }
+        } catch (error) {
+            const wasApplying = this._applyingInternally;
+            this._applyingInternally = true;
+            try {
+                const changes = Array.from(delta.changes());
+                for (let i = changes.length - 1; i >= 0; i--) {
+                    this._applyChangeCore(changes[i].reversed());
+                }
+            } finally {
+                this._applyingInternally = wasApplying;
+            }
+            const reversed = delta.reversed();
+            for (const callback of notified) {
+                callback(reversed, origin);
+            }
+            throw error;
+        }
+    }
 
     abstract insertOne(entity: Entity<EntityData>): Change;
 
@@ -44,8 +95,9 @@ export abstract class Store {
     update(entities: Entity<EntityData>[]): Change[] {
         return entities.map(entity => this.updateOne(entity))
     }
-    /** Apply a single change, firing onChanges with the given origin. */
+    /** Apply a single change, firing the callbacks with the given origin. */
     applyChange(change: Change, origin?: string): Change {
+        this._assertInActionIfRequired();
         this._applyingInternally = true;
         let appliedChange: Change;
         try {
@@ -53,13 +105,13 @@ export abstract class Store {
         } finally {
             this._applyingInternally = false;
         }
-        if (this.onChanges && !appliedChange.isEmpty()) {
-            this.onChanges(Delta.fromChanges([appliedChange]), origin);
+        if (!appliedChange.isEmpty()) {
+            this._fireOnChangesWithRollback(Delta.fromChanges([appliedChange]), origin);
         }
         return appliedChange;
     }
 
-    private _applyChangeCore(change: Change): Change {
+    protected _applyChangeCore(change: Change): Change {
         if (change.isCreate()) {
             let entityState = loadFromDict(change.forwardComponent as SerializedEntityData);
             return this.insertOne(entityState);
@@ -108,8 +160,9 @@ export abstract class Store {
         return Delta.fromChanges(changes);
     }
 
-    /** Apply a delta, firing onChanges once at the end with the given origin. */
+    /** Apply a delta, firing the callbacks once at the end with the given origin. */
     applyDelta(delta: Delta, origin?: string, skipIrrationalOperations: boolean = false): Delta {
+        this._assertInActionIfRequired();
         this._applyingInternally = true;
 
         const appliedDelta = new Delta({});
@@ -128,8 +181,8 @@ export abstract class Store {
             this._applyingInternally = false;
         }
 
-        if (this.onChanges && !appliedDelta.isEmpty()) {
-            this.onChanges(appliedDelta, origin);
+        if (!appliedDelta.isEmpty()) {
+            this._fireOnChangesWithRollback(appliedDelta, origin);
         }
         return appliedDelta;
     }

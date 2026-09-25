@@ -2,46 +2,65 @@ from collections.abc import Callable, Generator
 from typing import Any
 
 from sivkit import Entity
+from sivkit.libs.action import check_in_action
 from sivkit.libs.model import load_from_dict, transformed_entity
 from sivkit.storage.change import Change
 from sivkit.storage.delta import Delta
 
+OnChangesCallback = Callable[[Delta, str | None], None]
+
 
 class Store:
     _applying_internally: bool = False
+    # When set, notifying operations must run inside an action (checked before the change).
+    require_action: bool = False
 
     def __init__(self) -> None:
-        self._on_changes_callbacks: list[Callable[[Delta, str | None], None]] = []
+        self._on_changes_callbacks: list[OnChangesCallback] = []
 
     # --- on_changes multi-handler API ---
 
-    def add_on_changes_callback(
-        self, callback: Callable[[Delta, str | None], None]
-    ) -> None:
+    def add_on_changes_callback(self, callback: OnChangesCallback) -> None:
+        """Callbacks run synchronously, in registration order."""
         self._on_changes_callbacks.append(callback)
 
-    def remove_on_changes_callback(
-        self, callback: Callable[[Delta, str | None], None]
-    ) -> None:
+    def remove_on_changes_callback(self, callback: OnChangesCallback) -> None:
         self._on_changes_callbacks.remove(callback)
 
+    def _assert_in_action_if_required(self) -> None:
+        if self.require_action:
+            check_in_action()
+
     def _fire_on_changes(self, delta: Delta, origin: str | None = None) -> None:
-        for cb in self._on_changes_callbacks:
+        for cb in list(self._on_changes_callbacks):
             cb(delta, origin)
 
-    @property
-    def on_changes(self) -> Callable[[Delta, str | None], None] | None:
-        """Backward-compat: returns the fire method if callbacks are registered."""
-        if self._on_changes_callbacks:
-            return self._fire_on_changes
-        return None
+    def _fire_on_changes_with_rollback(
+        self, delta: Delta, origin: str | None = None
+    ) -> None:
+        """Fire the on_changes callbacks; if any raises, undo this call's
+        changes, pass the reversed delta to the callbacks that already saw
+        them, and re-raise.
 
-    @on_changes.setter
-    def on_changes(self, callback: Callable[[Delta, str | None], None] | None) -> None:
-        """Backward-compat: replaces all callbacks with a single one."""
-        self._on_changes_callbacks.clear()
-        if callback is not None:
-            self._on_changes_callbacks.append(callback)
+        Atomicity across separate store calls is the caller's concern.
+        """
+        notified: list[OnChangesCallback] = []
+        try:
+            for cb in list(self._on_changes_callbacks):
+                cb(delta, origin)
+                notified.append(cb)
+        except BaseException:
+            was_applying = self._applying_internally
+            self._applying_internally = True
+            try:
+                for change in reversed(list(delta.changes())):
+                    self._apply_change_core(change.reversed())
+            finally:
+                self._applying_internally = was_applying
+            reversed_delta = delta.reversed()
+            for cb in notified:
+                cb(reversed_delta, origin)
+            raise
 
     def insert_one(self, entity: Entity) -> Change:
         raise NotImplementedError
@@ -74,14 +93,15 @@ class Store:
         return [self.update_one(entity) for entity in batch]
 
     def apply_change(self, change: Change, origin: str | None = None) -> Change:
+        self._assert_in_action_if_required()
         self._applying_internally = True
         try:
             applied = self._apply_change_core(change)
         finally:
             self._applying_internally = False
 
-        if self._on_changes_callbacks and not applied.is_empty():
-            self._fire_on_changes(Delta.from_changes([applied]), origin)
+        if not applied.is_empty():
+            self._fire_on_changes_with_rollback(Delta.from_changes([applied]), origin)
         return applied
 
     def clear(self) -> None:
@@ -108,6 +128,7 @@ class Store:
 
     def apply_delta(self, delta: Delta, origin: str | None = None) -> Delta:
         """Apply all changes in a Delta to the store. Returns the applied delta."""
+        self._assert_in_action_if_required()
         self._applying_internally = True
 
         applied = Delta()
@@ -118,8 +139,8 @@ class Store:
         finally:
             self._applying_internally = False
 
-        if self._on_changes_callbacks and not applied.is_empty():
-            self._fire_on_changes(applied, origin)
+        if not applied.is_empty():
+            self._fire_on_changes_with_rollback(applied, origin)
         return applied
 
     def _apply_change_core(self, change: Change) -> Change:

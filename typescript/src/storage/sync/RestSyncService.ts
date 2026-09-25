@@ -1,8 +1,7 @@
 import { getLogger } from "../../logging";
 import { Delta } from "../../model/Delta";
 import { SerializedEntityData, loadFromDict } from "../../model/Entity";
-import { InMemoryStore } from "../domain-store/InMemoryStore";
-import { StoreSyncService } from "./StoreSyncService";
+import { StoreSyncServiceBase } from "./StoreSyncServiceBase";
 
 const log = getLogger('RestSyncLink');
 
@@ -18,8 +17,7 @@ interface FullStateResponse {
     entities: SerializedEntityData[];
 }
 
-export class RestSyncService implements StoreSyncService {
-    private _store: InMemoryStore | null = null;
+export class RestSyncService extends StoreSyncServiceBase {
     private _endpoint: string;
     private _headers: (() => HeadersInit) | undefined;
     private _seq: number = 0;
@@ -28,19 +26,9 @@ export class RestSyncService implements StoreSyncService {
     private _disposed: boolean = false;
 
     constructor(config: RestSyncLinkConfig) {
+        super();
         this._endpoint = config.endpoint;
         this._headers = config.headers;
-    }
-
-    setStore(store: InMemoryStore): void {
-        this._store = store;
-    }
-
-    private get store(): InMemoryStore {
-        if (!this._store) {
-            throw new Error('Store not set. Call setStore() before using RestSyncLink.');
-        }
-        return this._store;
     }
 
     private _buildHeaders(): Record<string, string> {
@@ -154,7 +142,7 @@ export class RestSyncService implements StoreSyncService {
                         if (parsed.delta) {
                             const remoteDelta = new Delta(parsed.delta);
                             if (Object.keys(remoteDelta.data).length > 0) {
-                                this.store.applyDelta(remoteDelta, 'remote', true);
+                                this.applyRemoteDelta(remoteDelta, true);
                             }
                         }
                     }

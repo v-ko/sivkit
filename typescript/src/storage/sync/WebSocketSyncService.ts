@@ -7,9 +7,9 @@
  * symmetric: local deltas are sent and ACKed, remote deltas are received,
  * applied, and ACKed.
  *
- * Since `loadData` does **not** fire `onChanges`, the hydration delta is
- * invisible to consumers wired via `store.onChanges`.  Only real user-action
- * deltas trigger the callback.
+ * Since `loadData` does **not** fire the on-changes callbacks, the hydration
+ * delta is invisible to consumers wired via `store.addOnChangesCallback`. Only
+ * real user-action deltas trigger the callbacks.
  *
  * An optional `onFullStateReceived` callback (no arguments) is invoked
  * after the full-state has been loaded into the store, for consumers
@@ -25,8 +25,7 @@
 import { getLogger } from "../../logging";
 import { Delta, DeltaData } from "../../model/Delta";
 import { SerializedEntityData, loadFromDict, dumpToDict } from "../../model/Entity";
-import { InMemoryStore } from "../domain-store/InMemoryStore";
-import { StoreSyncService } from "./StoreSyncService";
+import { StoreSyncServiceBase } from "./StoreSyncServiceBase";
 
 const log = getLogger('WebSocketSyncService');
 
@@ -55,8 +54,7 @@ type WsSyncMessage =
     | { type: 'ack'; seq: number }
     | { type: 'reject'; seq: number; server_seq: number };
 
-export class WebSocketSyncService implements StoreSyncService {
-    private _store: InMemoryStore | null = null;
+export class WebSocketSyncService extends StoreSyncServiceBase {
     private _ws: WebSocket | null = null;
     private _role: WebSocketSyncServiceRole;
     private _url: string;
@@ -65,20 +63,10 @@ export class WebSocketSyncService implements StoreSyncService {
     private _pendingAcks: Map<number, PendingAck> = new Map();
 
     constructor(config: WebSocketSyncServiceConfig) {
+        super();
         this._role = config.role;
         this._url = config.url;
         this._protocols = config.protocols;
-    }
-
-    // -- StoreSyncService interface ----------------------------------------
-
-    setStore(store: InMemoryStore): void {
-        this._store = store;
-    }
-
-    private get store(): InMemoryStore {
-        if (!this._store) throw new Error('Store not set');
-        return this._store;
     }
 
     /**
@@ -195,7 +183,7 @@ export class WebSocketSyncService implements StoreSyncService {
 
             case 'delta': {
                 const delta = new Delta(msg.delta);
-                this.store.applyDelta(delta, 'remote');
+                this.applyRemoteDelta(delta);
                 this._send({ type: 'ack', seq: msg.seq });
                 this._seq = Math.max(this._seq, msg.seq);
                 break;

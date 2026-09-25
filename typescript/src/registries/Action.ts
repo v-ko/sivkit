@@ -1,5 +1,7 @@
 import { runInAction } from "mobx";
 import { getLogger } from "../logging";
+import type { Delta } from "../model/Delta";
+import type { Store } from "../storage/domain-store/BaseStore";
 
 const log = getLogger('Action library');
 
@@ -8,21 +10,68 @@ const log = getLogger('Action library');
 let _actionCallStack: Array<ActionState> = [];
 
 // Middleware related
-type ReportActionStateHook = (action: ActionState) => void;
-let _rootActionStartedHooks: Array<ReportActionStateHook> = [];
-let _rootActionCompletedHooks: Array<ReportActionStateHook> = [];
+type RootActionStartedHook = (action: ActionState) => void;
+type RootActionCompletedHook = (action: ActionState) => void;
+let _rootActionStartedHooks: Array<RootActionStartedHook> = [];
+let _rootActionCompletedHooks: Array<RootActionCompletedHook> = [];
+
+/** One store notification recorded during a root action. */
+export interface DomainStoreChange {
+    delta: Delta;
+    origin?: string;
+    /** The innermost action running when the change was committed. */
+    action: ActionState;
+}
+
+export type RootActionChangesHandler = (rootAction: ActionState, changes: DomainStoreChange[]) => void;
+
+interface ChangesRegistration {
+    store: Store;
+    handler: RootActionChangesHandler;
+    changes: DomainStoreChange[];
+}
+let _changesRegistrations: Array<ChangesRegistration> = [];
 
 // Exception handling
 type ActionExceptionHandler = (action: ActionState, error: unknown) => void;
 let _actionExceptionHandler: ActionExceptionHandler | null = null;
 
+/**
+ * Record the store's changes per root action and hand them to the handler when
+ * the root action completes (called on every root action, with possibly no
+ * changes). Sets `store.requireAction`, so changing the store outside an action
+ * throws before the change. Returns an unregister function.
+ */
+export function registerRootActionChangesHandler(
+    store: Store,
+    handler: RootActionChangesHandler,
+): () => void {
+    log.info('registerRootActionChangesHandler called')
+    const registration: ChangesRegistration = { store, handler, changes: [] };
+    const callback = (delta: Delta, origin?: string) => {
+        registration.changes.push({
+            delta,
+            origin,
+            action: _actionCallStack[_actionCallStack.length - 1],
+        });
+    };
+    store.addOnChangesCallback(callback);
+    store.requireAction = true;
+    _changesRegistrations.push(registration);
+    return () => {
+        store.removeOnChangesCallback(callback);
+        _changesRegistrations = _changesRegistrations.filter(r => r !== registration);
+        store.requireAction = _changesRegistrations.some(r => r.store === store);
+    };
+}
+
 // Register the root action hooks
-export function registerRootActionStartedHook(hook: ReportActionStateHook) {
+export function registerRootActionStartedHook(hook: RootActionStartedHook) {
     log.info('registerRootActionStartedHook called')
     _rootActionStartedHooks.push(hook);
 }
 
-export function registerRootActionCompletedHook(hook: ReportActionStateHook) {
+export function registerRootActionCompletedHook(hook: RootActionCompletedHook) {
     log.info('registerRootActionCompletedHook called')
     _rootActionCompletedHooks.push(hook);
 }
@@ -30,6 +79,18 @@ export function registerRootActionCompletedHook(hook: ReportActionStateHook) {
 export function setActionExceptionHandler(handler: ActionExceptionHandler) {
     log.info('setActionExceptionHandler called')
     _actionExceptionHandler = handler;
+}
+
+export function isInAction(): boolean {
+    return _actionCallStack.length > 0;
+}
+
+export function assertInAction(): void {
+    if (!isInAction()) {
+        throw new Error(
+            'State changes can only happen in functions decorated with the @action decorator'
+        );
+    }
 }
 
 function processMethod(descriptor: PropertyDescriptor, name: string, issuer: string): PropertyDescriptor {
@@ -56,11 +117,33 @@ function processMethod(descriptor: PropertyDescriptor, name: string, issuer: str
                 log.error(`Error in action ${funcName}`, e);
                 exception = e;
             }
-        });
-        if (exception) {
-            // If an exception was thrown, set the action state to failed
-            actionState.runState = ActionRunStates.FAILED;
 
+            // Complete the action state and, at root level, fire the changes
+            // handlers and completion hooks INSIDE this transaction so any
+            // projection they trigger merges into a single mobx flush. They run
+            // even on failure, with whatever changes committed so far.
+            const completed = _actionCallStack.pop()!;
+            if (exception) {
+                completed.runState = ActionRunStates.FAILED;
+                completed.duration = Date.now() - completed.startTime;
+            } else {
+                completed.setCompleted();
+            }
+            if (_actionCallStack.length === 0) {
+                for (const registration of [..._changesRegistrations]) {
+                    const changes = registration.changes;
+                    registration.changes = [];
+                    try {
+                        registration.handler(completed, changes);
+                    } catch (error) {
+                        log.error(`Error in root action changes handler for ${funcName}`, error);
+                    }
+                }
+                _rootActionCompletedHooks.forEach(hook => hook(completed));
+            }
+        });
+
+        if (exception) {
             // Call exception handler or rethrow
             if (_actionExceptionHandler) {
                 try {
@@ -69,19 +152,7 @@ function processMethod(descriptor: PropertyDescriptor, name: string, issuer: str
                     log.error(`Error in action exception handler for ${funcName}`, handlerError);
                 }
             }
-        }
 
-
-        // Complete the action state
-        actionState = _actionCallStack.pop()!;
-        actionState.setCompleted();
-
-        if (_actionCallStack.length === 0) {
-            // Call the root action hooks
-            _rootActionCompletedHooks.forEach(hook => hook(actionState));
-        }
-
-        if (exception) {
             // If an exception was thrown, rethrow it
             throw exception;
         }
