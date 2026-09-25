@@ -6,15 +6,14 @@ altered in actions). They are created, updated, and deleted by the projection fu
 which takes in domain store changes from the actions.
 """
 
-from typing import TYPE_CHECKING, Callable
+from typing import Callable, TypeVar
 
 from sivkit.libs.action import register_root_action_changes_handler
+from sivkit.storage.base_store import Store
 from sivkit.storage.delta import Delta
 
-if TYPE_CHECKING:
-    from sivkit.storage.base_store import Store
-
-Projector = Callable[[Delta, Store], None]
+S = TypeVar("S", bound=Store)
+Projector = Callable[[Delta, S], None]
 
 # Projectors track their own scope rather than piggybacking on the action stack.
 _in_projection = False
@@ -43,7 +42,7 @@ def run_in_projection(fn: Callable):
         _in_projection = was_in_projection
 
 
-def register_projection(store: Store, projector: Projector) -> Callable[[], None]:
+def register_projection(store: S, projector: Projector[S]) -> Callable[[], None]:
     """Register the store's projector (one per store).
 
     At each root action's end the projector gets the action's store changes

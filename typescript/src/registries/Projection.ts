@@ -3,7 +3,7 @@ import { Delta } from "../model/Delta";
 import type { Store } from "../storage/domain-store/BaseStore";
 import { registerRootActionChangesHandler } from "./Action";
 
-export type Projector = (delta: Delta, store: Store) => void;
+export type Projector<S extends Store = Store> = (delta: Delta, store: S) => void;
 
 // Projectors are the sole writers of projection-managed view state. They run as
 // plain mobx actions (no sivkit action frame), so this module tracks its own
@@ -39,7 +39,7 @@ export function runInProjection<T>(fn: () => T): T {
  * projector gets the action's store changes merged into one delta (possibly
  * empty) and the store, inside projection scope. Returns an unregister function.
  */
-export function registerProjection(store: Store, projector: Projector): () => void {
+export function registerProjection<S extends Store>(store: S, projector: Projector<S>): () => void {
     if (_projections.has(store)) {
         throw new Error('A projection is already registered for this store');
     }
