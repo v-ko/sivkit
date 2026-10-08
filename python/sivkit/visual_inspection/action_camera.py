@@ -20,7 +20,7 @@ from sivkit.util import Color, Point2D, Rectangle
 @contextmanager
 def exec_action(delay_before_next: float = 0, apply_delay=True, speedup=2):
     t0 = time.time()
-    # fusion.main_loop().process_events(repeat=10)
+    # sivkit.main_loop().process_events(repeat=10)
     yield
     # Hacky way to ensure all events get processed
     sivkit.main_loop().process_events(repeat=10)
@@ -178,7 +178,7 @@ def test_new(window_fixture, request):
         desktop_app.get_app().exec()
         # app: QApplication = desktop_app.get_app()
         # while any([w.isVisible() for w in app.topLevelWindows()]):
-        #     fusion.main_loop().process_events()
+        #     sivkit.main_loop().process_events()
 
         sub.unsubscribe()
         path.write_text(self.generate_code_for_recording())

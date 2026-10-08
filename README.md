@@ -323,7 +323,7 @@ set_main_loop(QtMainLoop(app))  # installs the async event loop
 app.exec()
 ```
 
-Under the hood, `QtAsyncEventLoop` integrates asyncio into Qt's event loop via `QTimer` (for scheduled callbacks) and `QSocketNotifier` (for I/O). Everything runs on the main thread — no cross-thread state access issues, same model as JavaScript.
+Under the hood, [qasync](https://github.com/CabbageDevelopment/qasync) integrates asyncio into Qt's event loop (`QTimer` for scheduled callbacks, `QSocketNotifier` for I/O on Unix, IOCP on Windows). Everything runs on the main thread — no cross-thread state access issues, same model as JavaScript.
 
 #### Usage (Python)
 

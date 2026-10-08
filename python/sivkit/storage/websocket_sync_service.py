@@ -124,6 +124,7 @@ class WebSocketSyncService:
         self._on_ready = on_ready
 
         self._seq: int = 0
+        # Recreated per session: a queue is bound to the loop that first awaits it.
         self._outbound: asyncio.Queue[
             tuple[int, int, DeltaData, asyncio.Future[None]]
         ] = asyncio.Queue()
@@ -201,6 +202,7 @@ class WebSocketSyncService:
             )
 
         self._loop = asyncio.get_running_loop()
+        self._outbound = asyncio.Queue()
         self.running = True
 
         def _outbound(delta: Delta, origin: str | None = None) -> None:
@@ -237,6 +239,11 @@ class WebSocketSyncService:
                 if not future.done():
                     future.cancel()
             self._pending_acks.clear()
+            # Unsent deltas are already in the next client's full_state.
+            while not self._outbound.empty():
+                *_, future = self._outbound.get_nowait()
+                if not future.done():
+                    future.cancel()
 
     # ------------------------------------------------------------------
     # Internal loops

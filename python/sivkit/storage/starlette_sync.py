@@ -10,6 +10,9 @@ from sivkit.storage.websocket_sync_service import WebSocketSyncService
 
 log = logging.getLogger(__name__)
 
+# WebSocket close code sent when the sync service already serves a client.
+SESSION_ACTIVE_CLOSE_CODE = 4409
+
 try:
     from starlette.websockets import WebSocket, WebSocketDisconnect
 except ImportError as _exc:
@@ -48,6 +51,12 @@ class StarletteSyncEndpoint:
     async def serve(self, websocket: WebSocket) -> None:
         """Accept, adapt, run. Catches WebSocketDisconnect."""
         await websocket.accept()
+        # Accept before closing so the client receives the close code.
+        if self._sync.running:
+            await websocket.close(
+                code=SESSION_ACTIVE_CLOSE_CODE, reason="Another session is active"
+            )
+            return
 
         async def send(msg: dict) -> None:
             await websocket.send_json(msg)
@@ -57,5 +66,5 @@ class StarletteSyncEndpoint:
 
         try:
             await self._sync.run(send, receive)
-        except WebSocketDisconnect:
+        except* WebSocketDisconnect:
             pass

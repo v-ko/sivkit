@@ -11,6 +11,7 @@ import { RestApiDomainStoreAdapter } from "../domain-store-adapter/RestApiDomain
 import { loadFromDict } from "../../model/Entity";
 import { Delta, DeltaData } from "../../model/Delta";
 import { Change } from "../../model/Change";
+import type { CommitData } from "../version-control/Commit";
 
 let log = getLogger('ProjectStorageManager');
 
@@ -31,6 +32,10 @@ export interface StorageAddon {
     onProjectLoaded(): Promise<void>;
     /** Called at the start of unload. Use for poll loop stop and bridge teardown. */
     onProjectUnloading(): Promise<void>;
+    /** Called in the commit lock after each local commit, before the squash. Errors are logged. */
+    onCommitted?(commit: CommitData): void;
+    /** Handles `StorageService.sendToAddon` messages. */
+    onMessage?(message: unknown): unknown;
 }
 
 export interface ProjectStorageConfig {
@@ -132,7 +137,7 @@ export class ProjectStorageManager {
     private _localFileStore: FileStoreAdapter | null = null;
     private _parentStorageService: StorageService | null = null;
     private _domainStoreAdapter: DomainStoreAdapter | null = null;
-    private _addons: StorageAddon[] = [];
+    private _addons: Map<string, StorageAddon> = new Map();
     private _projectUri: string | undefined = undefined;
 
     constructor(config: ProjectStorageConfig, parentStorageService: StorageService | null = null) {
@@ -173,8 +178,25 @@ export class ProjectStorageManager {
         return this._projectUri;
     }
 
-    addAddon(addon: StorageAddon) {
-        this._addons.push(addon);
+    addAddon(name: string, addon: StorageAddon) {
+        if (this._addons.has(name)) throw new Error(`Addon ${name} already added`);
+        this._addons.set(name, addon);
+    }
+
+    notifyCommitted(commit: CommitData) {
+        for (const [name, addon] of this._addons) {
+            try {
+                addon.onCommitted?.(commit);
+            } catch (e) {
+                log.error(`Addon ${name} failed in onCommitted`, e);
+            }
+        }
+    }
+
+    async sendToAddon(name: string, message: unknown): Promise<unknown> {
+        const addon = this._addons.get(name);
+        if (!addon?.onMessage) throw new Error(`No addon ${name} handling messages`);
+        return addon.onMessage(message);
     }
 
     get domainStoreAdapter(): DomainStoreAdapter | null {
@@ -188,7 +210,7 @@ export class ProjectStorageManager {
         const ds = this._domainStoreAdapter;
 
         // 1. Early addon hook (e.g. bridge setup)
-        for (const addon of this._addons) {
+        for (const addon of this._addons.values()) {
             if (addon.onProjectLoading) {
                 await addon.onProjectLoading();
             }
@@ -272,7 +294,7 @@ export class ProjectStorageManager {
         this._localFileStore = await initFileStore(this.config.onDeviceFileStore)
 
         // Notify addons after project is fully loaded
-        for (const addon of this._addons) {
+        for (const addon of this._addons.values()) {
             await addon.onProjectLoaded();
         }
     }
@@ -287,7 +309,7 @@ export class ProjectStorageManager {
 
     async unloadProject(): Promise<void> {
         log.info('Closing project storage manager')
-        for (const addon of this._addons) {
+        for (const addon of this._addons.values()) {
             await addon.onProjectUnloading();
         }
         if (this._onDeviceRepo) {

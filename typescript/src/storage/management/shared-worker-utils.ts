@@ -34,6 +34,9 @@ function createLoggedStorageServiceBridge(storageService: StorageServiceInterfac
         commit: async (projectId, deltaData, message) => {
             return logWorkerOperation('commit', `projectId=${projectId}`, () => storageService.commit(projectId, deltaData, message));
         },
+        sendToAddon: async (projectId, addonName, message) => {
+            return logWorkerOperation('sendToAddon', `projectId=${projectId} addon=${addonName}`, () => storageService.sendToAddon(projectId, addonName, message));
+        },
         addFile: async (projectId, blob, path) => {
             return logWorkerOperation('addFile', `projectId=${projectId} path=${path} size=${blob.size}`, () => storageService.addFile(projectId, blob, path));
         },

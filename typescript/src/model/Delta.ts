@@ -1,5 +1,5 @@
 import { Change, ChangeData, ChangeType } from "./Change";
-import { entityKeysAreEqual } from "./Entity";
+import { entityKeysAreEqual, type Entity, type EntityData } from "./Entity";
 import { getLogger } from "../logging";
 
 let log = getLogger('Delta')
@@ -47,6 +47,10 @@ export class Delta {
             delta.addChange(change)
         }
         return delta;
+    }
+
+    static fromEntities(entities: Iterable<Entity<EntityData>>): Delta {
+        return Delta.fromChanges(Array.from(entities, entity => Change.create(entity)));
     }
 
     get data(): DeltaData {

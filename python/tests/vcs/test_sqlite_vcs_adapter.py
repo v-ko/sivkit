@@ -57,7 +57,11 @@ def test_snapshot_save_and_load(DummyPage):
 
         # Verify it persists
         loaded = adapter.load_snapshot(commit.id)
+        assert loaded is not None
         assert "p1" in loaded
         assert loaded["p1"]["name"] == "Page 1"
+
+        adapter.delete_snapshot(commit.id)
+        assert adapter.load_snapshot(commit.id) is None
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

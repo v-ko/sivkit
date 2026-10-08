@@ -249,6 +249,10 @@ export class StorageServiceProxy {
         return this.service.commit(projectId, deltaData, message);
     }
 
+    async sendToAddon(projectId: string, addonName: string, message: unknown): Promise<unknown> {
+        return this.service.sendToAddon(projectId, addonName, message);
+    }
+
     getCommitGraph(projectId: string): Promise<CommitGraphData> {
         return this.service.getCommitGraph(projectId);
     }

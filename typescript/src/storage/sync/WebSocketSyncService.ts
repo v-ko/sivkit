@@ -33,6 +33,16 @@ const ACK_TIMEOUT_MS = 5000;
 
 export type WebSocketSyncServiceRole = 'authority' | 'receiver';
 
+/** Close code the authority sends when it already serves another client. */
+export const SESSION_ACTIVE_CLOSE_CODE = 4409;
+
+export class WebSocketClosedError extends Error {
+    constructor(public code: number, reason: string) {
+        super(`WebSocket closed (${code})${reason ? `: ${reason}` : ''}`);
+        this.name = 'WebSocketClosedError';
+    }
+}
+
 export interface WebSocketSyncServiceConfig {
     /** 'authority' sends full_state on connect; 'receiver' expects it. */
     role: WebSocketSyncServiceRole;
@@ -120,13 +130,11 @@ export class WebSocketSyncService extends StoreSyncServiceBase {
                 }
             };
 
-            ws.onclose = () => {
-                // Reject all pending ACKs
-                for (const [, entry] of this._pendingAcks) {
-                    clearTimeout(entry.timer);
-                    entry.reject(new Error('Connection closed'));
+            ws.onclose = (event) => {
+                if (!handshakeComplete) {
+                    reject(new WebSocketClosedError(event.code, event.reason));
                 }
-                this._pendingAcks.clear();
+                this._rejectPendingAcks('Connection closed');
             };
         });
     }
@@ -167,8 +175,13 @@ export class WebSocketSyncService extends StoreSyncServiceBase {
             this._ws.close();
             this._ws = null;
         }
+        this._rejectPendingAcks('Disposed');
+    }
+
+    private _rejectPendingAcks(reason: string): void {
         for (const [, entry] of this._pendingAcks) {
             clearTimeout(entry.timer);
+            entry.reject(new Error(reason));
         }
         this._pendingAcks.clear();
     }

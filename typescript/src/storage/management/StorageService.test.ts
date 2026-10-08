@@ -225,6 +225,38 @@ describe("StorageService base functionality", () => {
         expect(newEntities.length).toBe(2);
     });
 
+    test("addons get each commit and messages by name", async () => {
+        const committed: string[] = [];
+        const addonService = new StorageServiceProxy();
+        addonService.setupInMainThread([
+            {
+                name: 'failing', create: () => ({
+                    onProjectLoaded: async () => { },
+                    onProjectUnloading: async () => { },
+                    onCommitted: () => { throw new Error('addon bug'); },
+                })
+            },
+            {
+                name: 'recorder', create: () => ({
+                    onProjectLoaded: async () => { },
+                    onProjectUnloading: async () => { },
+                    onCommitted: (commit) => { committed.push(commit.message); },
+                    onMessage: async (message) => ({ echo: message }),
+                })
+            },
+        ]);
+        await addonService.createProject(projectId, projectStorageConfig);
+        await addonService.loadProject(projectId, projectStorageConfig, () => { });
+
+        const page = new DummyPage({ id: createId(), parent_id: '', name: "P" });
+        await addonService.commit(projectId, Delta.fromChanges([Change.create(page)]).data, "c0");
+        expect(committed).toEqual(["c0"]);
+
+        await expect(addonService.sendToAddon(projectId, 'recorder', 'hi')).resolves.toEqual({ echo: 'hi' });
+        await expect(addonService.sendToAddon(projectId, 'failing', 'hi')).rejects.toThrow();
+        addonService.disconnect();
+    });
+
     test('File operations', async () => {
         // Load project
         await storageService.createProject(projectId, projectStorageConfig);

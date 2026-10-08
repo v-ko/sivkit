@@ -1,4 +1,4 @@
-"""SQLite-backed VCS adapter with snapshot support (via peewee)."""
+"""SQLite-backed VCS adapter with snapshot support (via SQLAlchemy)."""
 
 from __future__ import annotations
 
@@ -7,53 +7,56 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import peewee as pw
+from sqlalchemy import Float, Insert, Text, delete, exists, insert, select, update
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from sivkit.storage.commit import Commit, CommitMetadata
 from sivkit.storage.commit_graph import BranchMetadata, CommitGraph, CommitGraphData
+from sivkit.storage.sqlite_engine import create_sqlite_engine
 from sivkit.storage.vcs_adapter import InternalRepoUpdate, VcsAdapter
 
 log = logging.getLogger(__name__)
 
-_ALL_MODELS: list[type[pw.Model]] = []
+
+class _Base(DeclarativeBase):
+    pass
 
 
-class CommitRow(pw.Model):
-    id: str = pw.TextField(primary_key=True)  # type: ignore[assignment]
-    parent_id: str = pw.TextField(default="")  # type: ignore[assignment]
-    snapshot_hash: str = pw.TextField(default="")  # type: ignore[assignment]
-    timestamp: float = pw.DoubleField(default=0)  # type: ignore[assignment]
-    message: str = pw.TextField(default="")  # type: ignore[assignment]
-    delta_data: str = pw.TextField(default="{}")  # type: ignore[assignment]
+# Table names match the ones peewee created, so existing databases open as is.
+class CommitRow(_Base):
+    __tablename__ = "commitrow"
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    parent_id: Mapped[str] = mapped_column(Text, default="")
+    snapshot_hash: Mapped[str] = mapped_column(Text, default="")
+    timestamp: Mapped[float] = mapped_column(Float, default=0)
+    message: Mapped[str] = mapped_column(Text, default="")
+    delta_data: Mapped[str] = mapped_column(Text, default="{}")
 
 
-class SnapshotRow(pw.Model):
-    commit_id: str = pw.TextField(primary_key=True)  # type: ignore[assignment]
-    data: str = pw.TextField()  # type: ignore[assignment]
+class SnapshotRow(_Base):
+    __tablename__ = "snapshotrow"
+    commit_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    data: Mapped[str] = mapped_column(Text)
 
 
-class BranchRow(pw.Model):
-    name: str = pw.TextField(primary_key=True)  # type: ignore[assignment]
-    head_commit_id: str | None = pw.TextField(null=True)  # type: ignore[assignment]
+class BranchRow(_Base):
+    __tablename__ = "branchrow"
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    head_commit_id: Mapped[str | None] = mapped_column(Text)
 
 
-_ALL_MODELS = [CommitRow, SnapshotRow, BranchRow]
+def _replace(model: type[_Base], **values: Any) -> Insert:
+    # INSERT OR REPLACE (not an upsert): the row gets a new rowid, as with peewee.
+    return insert(model).prefix_with("OR REPLACE").values(**values)
 
 
 class SqliteVcsAdapter(VcsAdapter):
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = Path(db_path)
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = pw.SqliteDatabase(
-            str(self._db_path), pragmas={"journal_mode": "wal"}
-        )
-        self._db.connect()
-        with self._db.bind_ctx(_ALL_MODELS):
-            self._db.create_tables(_ALL_MODELS)
-
-    def _ctx(self):
-        return self._db.bind_ctx(_ALL_MODELS)
+        self._engine = create_sqlite_engine(self._db_path)
+        _Base.metadata.create_all(self._engine)
+        self._session = sessionmaker(self._engine)
 
     # ------------------------------------------------------------------
     # VcsAdapter interface
@@ -61,21 +64,25 @@ class SqliteVcsAdapter(VcsAdapter):
 
     def get_commit_graph(self) -> CommitGraph:
         graph = CommitGraph()
-        with self._ctx():
-            for row in BranchRow.select():
+        with self._session() as s:
+            for name, head_commit_id in s.execute(
+                select(BranchRow.name, BranchRow.head_commit_id)
+            ):
                 try:
-                    graph.create_branch(row.name)
+                    graph.create_branch(name)
                 except ValueError:
                     pass
-                if row.head_commit_id:
-                    graph.set_branch(row.name, row.head_commit_id)
+                if head_commit_id:
+                    graph.set_branch(name, head_commit_id)
 
-            for row in CommitRow.select(
-                CommitRow.id,
-                CommitRow.parent_id,
-                CommitRow.snapshot_hash,
-                CommitRow.timestamp,
-                CommitRow.message,
+            for row in s.execute(
+                select(
+                    CommitRow.id,
+                    CommitRow.parent_id,
+                    CommitRow.snapshot_hash,
+                    CommitRow.timestamp,
+                    CommitRow.message,
+                )
             ):
                 meta = CommitMetadata(
                     id=row.id,
@@ -89,93 +96,100 @@ class SqliteVcsAdapter(VcsAdapter):
         return graph
 
     def get_commits(self, ids: list[str] | None = None) -> list[Commit]:
-        result: list[Commit] = []
-        with self._ctx():
+        with self._session() as s:
             if ids is None:
                 # Full table scan — return all commits (used by hydration)
-                for row in CommitRow.select():
-                    result.append(self._row_to_commit(row))
-            else:
-                # Batch fetch by IDs in chunks to stay within SQLite variable limits
-                CHUNK_SIZE = 500
-                # Build an id→position map to preserve requested order
-                id_to_pos = {cid: i for i, cid in enumerate(ids)}
-                result = [None] * len(ids)  # type: ignore[list-item]
-                for start in range(0, len(ids), CHUNK_SIZE):
-                    chunk = ids[start : start + CHUNK_SIZE]
-                    for row in CommitRow.select().where(
-                        CommitRow.id << chunk
-                    ):  # type: ignore[operator]  # peewee Field.__lshift__ → SQL IN
-                        pos = id_to_pos[row.id]
-                        result[pos] = self._row_to_commit(row)
-                # Check for missing commits
-                for i, commit in enumerate(result):
-                    if commit is None:
-                        raise ValueError(f"Commit {ids[i]} not found")
-        return result
+                return [
+                    self._row_to_commit(row) for row in s.scalars(select(CommitRow))
+                ]
+
+            # Batch fetch by IDs in chunks to stay within SQLite variable limits
+            CHUNK_SIZE = 500
+            # Build an id→position map to preserve requested order
+            id_to_pos = {cid: i for i, cid in enumerate(ids)}
+            result: list[Commit | None] = [None] * len(ids)
+            for start in range(0, len(ids), CHUNK_SIZE):
+                chunk = ids[start : start + CHUNK_SIZE]
+                for row in s.scalars(select(CommitRow).where(CommitRow.id.in_(chunk))):
+                    result[id_to_pos[row.id]] = self._row_to_commit(row)
+        # Check for missing commits
+        for i, commit in enumerate(result):
+            if commit is None:
+                raise ValueError(f"Commit {ids[i]} not found")
+        return result  # type: ignore[return-value]
 
     def apply_update(self, update: InternalRepoUpdate) -> None:
-        with self._ctx(), self._db.atomic():
+        with self._session.begin() as s:
             for meta in update.removed_commits:
-                CommitRow.delete_by_id(meta.id)
+                s.execute(delete(CommitRow).where(CommitRow.id == meta.id))
 
             for commit in update.updated_commits:
-                self._upsert_commit(commit)
+                s.execute(self._replace_commit(commit))
 
             for commit in update.added_commits:
-                self._upsert_commit(commit)
+                s.execute(self._replace_commit(commit))
 
             for branch in update.added_branches:
-                BranchRow.replace(
-                    name=branch.name,
-                    head_commit_id=branch.head_commit_id,
-                ).execute()
+                s.execute(
+                    _replace(
+                        BranchRow,
+                        name=branch.name,
+                        head_commit_id=branch.head_commit_id,
+                    )
+                )
 
             for branch in update.updated_branches:
-                BranchRow.replace(
-                    name=branch.name,
-                    head_commit_id=branch.head_commit_id,
-                ).execute()
+                s.execute(
+                    _replace(
+                        BranchRow,
+                        name=branch.name,
+                        head_commit_id=branch.head_commit_id,
+                    )
+                )
 
             for branch in update.removed_branches:
-                BranchRow.delete().where(BranchRow.name == branch.name).execute()
+                s.execute(delete(BranchRow).where(BranchRow.name == branch.name))
 
     def close(self) -> None:
-        if not self._db.is_closed():
-            self._db.close()
+        self._engine.dispose()
 
     def erase_storage(self) -> None:
-        with self._ctx(), self._db.atomic():
-            SnapshotRow.delete().execute()
-            CommitRow.delete().execute()
-            BranchRow.delete().execute()
+        with self._session.begin() as s:
+            s.execute(delete(SnapshotRow))
+            s.execute(delete(CommitRow))
+            s.execute(delete(BranchRow))
 
     # ------------------------------------------------------------------
     # Snapshot support
     # ------------------------------------------------------------------
 
     def save_snapshot(self, commit_id: str, store_data: dict[str, Any]) -> None:
-        with self._ctx():
-            SnapshotRow.replace(
-                commit_id=commit_id,
-                data=json.dumps(store_data),
-            ).execute()
+        with self._session.begin() as s:
+            s.execute(
+                _replace(SnapshotRow, commit_id=commit_id, data=json.dumps(store_data))
+            )
 
     def load_snapshot(self, commit_id: str) -> dict[str, Any] | None:
-        with self._ctx():
-            row = SnapshotRow.get_or_none(SnapshotRow.commit_id == commit_id)
-        if row is None:
+        with self._session() as s:
+            data = s.scalar(
+                select(SnapshotRow.data).where(SnapshotRow.commit_id == commit_id)
+            )
+        if data is None:
             return None
-        return json.loads(row.data)
+        return json.loads(data)
+
+    def delete_snapshot(self, commit_id: str) -> None:
+        with self._session.begin() as s:
+            s.execute(delete(SnapshotRow).where(SnapshotRow.commit_id == commit_id))
 
     def snapshot_commit_ids(self) -> list[str]:
-        with self._ctx():
-            return [row.commit_id for row in SnapshotRow.select(SnapshotRow.commit_id)]
+        with self._session() as s:
+            return list(s.scalars(select(SnapshotRow.commit_id)))
 
     def has_snapshot(self, commit_id: str) -> bool:
-        with self._ctx():
-            return (
-                SnapshotRow.select().where(SnapshotRow.commit_id == commit_id).exists()
+        with self._session() as s:
+            return bool(
+                s.scalar(select(exists().where(SnapshotRow.commit_id == commit_id)))
             )
 
     # ------------------------------------------------------------------
@@ -190,17 +204,19 @@ class SqliteVcsAdapter(VcsAdapter):
         chain: list[str] = []
         current = start_id
         seen: set[str] = set()
-        with self._ctx():
+        with self._session() as s:
             while current:
                 if current in seen:
                     log.warning("Cycle detected at commit %s", current)
                     break
                 seen.add(current)
-                row = CommitRow.get_or_none(CommitRow.id == current)
-                if row is None:
+                parent_id = s.scalar(
+                    select(CommitRow.parent_id).where(CommitRow.id == current)
+                )
+                if parent_id is None:
                     break
                 chain.append(current)
-                current = row.parent_id
+                current = parent_id
         return chain
 
     def find_latest_snapshot_commit(self, head_id: str) -> str | None:
@@ -216,21 +232,23 @@ class SqliteVcsAdapter(VcsAdapter):
 
     def write_commit(self, commit: Commit) -> None:
         """Write a single commit to the DB."""
-        with self._ctx():
-            self._upsert_commit(commit)
+        with self._session.begin() as s:
+            s.execute(self._replace_commit(commit))
 
     def update_commit_field(self, commit_id: str, **fields: Any) -> None:
         """Update specific fields on an existing commit."""
-        with self._ctx():
-            CommitRow.update(**fields).where(CommitRow.id == commit_id).execute()
+        with self._session.begin() as s:
+            s.execute(
+                update(CommitRow).where(CommitRow.id == commit_id).values(**fields)
+            )
 
     def get_commit(self, commit_id: str) -> Commit | None:
         """Get a single commit by ID, or None."""
-        with self._ctx():
-            row = CommitRow.get_or_none(CommitRow.id == commit_id)
-        if row is None:
-            return None
-        return self._row_to_commit(row)
+        with self._session() as s:
+            row = s.get(CommitRow, commit_id)
+            if row is None:
+                return None
+            return self._row_to_commit(row)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -239,21 +257,22 @@ class SqliteVcsAdapter(VcsAdapter):
     @staticmethod
     def _row_to_commit(row: CommitRow) -> Commit:
         return Commit(
-            id=row.id,  # type: ignore
-            parent_id=row.parent_id,  # type: ignore
-            snapshot_hash=row.snapshot_hash,  # type: ignore
-            timestamp=row.timestamp,  # type: ignore
-            message=row.message,  # type: ignore
-            delta_data=json.loads(row.delta_data) if row.delta_data else {},  # type: ignore
+            id=row.id,
+            parent_id=row.parent_id,
+            snapshot_hash=row.snapshot_hash,
+            timestamp=row.timestamp,
+            message=row.message,
+            delta_data=json.loads(row.delta_data) if row.delta_data else {},
         )
 
     @staticmethod
-    def _upsert_commit(commit: Commit) -> None:
-        CommitRow.replace(
+    def _replace_commit(commit: Commit) -> Insert:
+        return _replace(
+            CommitRow,
             id=commit.id,
             parent_id=commit.parent_id,
             snapshot_hash=commit.snapshot_hash,
             timestamp=commit.timestamp,
             message=commit.message,
             delta_data=json.dumps(commit.delta_data),
-        ).execute()
+        )

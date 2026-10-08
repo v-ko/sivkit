@@ -1,5 +1,44 @@
 import { Delta, DeltaData, squashDeltas } from "./Delta";
 import { ChangeType } from "./Change";
+import { DummyPage } from "../storage/test-utils";
+
+describe("Delta.fromEntities", () => {
+    test("creates copied snapshots from entity iterables", () => {
+        expect(Delta.fromEntities([]).isEmpty()).toBe(true);
+        const entity = new DummyPage({ id: "e", parent_id: "", name: "first" });
+        const delta = Delta.fromEntities([entity].values());
+        expect(delta.data).toEqual({
+            e: ["e", {}, { id: "e", parent_id: "", name: "first", type_name: "DummyPage" }],
+        });
+        expect(delta.change("e")!.type()).toBe(ChangeType.CREATE);
+
+        entity.name = "second";
+        expect(delta.data.e[2].name).toBe("first");
+        delta.data.e[2].name = "third";
+        expect(entity.name).toBe("second");
+    });
+
+    test("reverse and compose compares snapshots without mutating them", () => {
+        const shared = new DummyPage({ id: "e", parent_id: "", name: "first" });
+        const updated = new DummyPage({ id: "e", parent_id: "", name: "second" });
+        const unchanged = new DummyPage({ id: "unchanged", parent_id: "", name: "same" });
+        const removed = new DummyPage({ id: "removed", parent_id: "", name: "removed" });
+        const added = new DummyPage({ id: "added", parent_id: "", name: "added" });
+        const from = [shared, unchanged, removed];
+        const to = [updated, unchanged, added];
+        const snapshots = [...from, ...to].map(entity => entity.data());
+
+        const delta = Delta.fromEntities(from).reversed();
+        delta.mergeWithPriority(Delta.fromEntities(to));
+
+        expect(delta.data).toEqual({
+            e: ["e", { name: "first" }, { name: "second" }],
+            removed: ["removed", { ...removed.data(), type_name: "DummyPage" }, {}],
+            added: ["added", {}, { ...added.data(), type_name: "DummyPage" }],
+        });
+        expect([...from, ...to].map(entity => entity.data())).toEqual(snapshots);
+    });
+});
 
 describe("Delta mergeChangeWithPriority", () => {
     // [description, firstDelta, nextDelta, expectedType|null, expectedReverse, expectedForward]

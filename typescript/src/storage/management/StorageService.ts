@@ -51,6 +51,7 @@ export interface StorageServiceInterface {
     getCommitGraph: (projectId: string) => Promise<CommitGraphData>;
     getCommits: (projectId: string, commitIds: string[]) => Promise<CommitData[]>;
     commit: (projectId: string, deltaData: DeltaData, message: string) => Promise<CommitOperationResult>;
+    sendToAddon: (projectId: string, addonName: string, message: unknown) => Promise<unknown>;
 
     // File operations
     addFile: (projectId: string, blob: Blob, path: string) => Promise<AddFileResult>;
@@ -147,7 +148,7 @@ export class StorageService implements StorageServiceInterface {
 
             // Attach addons
             for (const addonDesc of this._addons) {
-                repoManager.addAddon(addonDesc.create(repoManager));
+                repoManager.addAddon(addonDesc.name, addonDesc.create(repoManager));
             }
 
             await repoManager.loadProject(projectUri);
@@ -255,6 +256,7 @@ export class StorageService implements StorageServiceInterface {
             skipConflictingChanges: true,
         });
         log.info('Created commit', commit.id)
+        repoManager.notifyCommitted(commit.data());
 
         // Try squash before notifying subscribers, so the broadcast reflects latest graph
         const squashedUpserts = await squashBranchHistory(
@@ -371,6 +373,14 @@ export class StorageService implements StorageServiceInterface {
         }
 
         await repoManager.fileStore.removeFile(path);
+    }
+
+    async sendToAddon(projectId: string, addonName: string, message: unknown): Promise<unknown> {
+        const repoManager = this.repoManagers[projectId];
+        if (!repoManager) {
+            throw new Error("Repo not loaded");
+        }
+        return repoManager.sendToAddon(addonName, message);
     }
 
     disconnect() {
