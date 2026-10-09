@@ -366,8 +366,8 @@ class WebSocketSyncService:
            (server-wins on conflict)
         3. Apply transformed delta to store
         4. ACK the client's seq
-        5. If transformation removed fields, push a correction delta so the
-           client converges (client sees it as a normal remote delta)
+        5. If conflicting client fields differ from server state, push a
+           correction so the client converges (a normal remote delta)
         """
         # Collect server deltas that happened between base_seq and current seq
         server_ops = Delta()
@@ -387,8 +387,8 @@ class WebSocketSyncService:
         # ACK the client
         await send({"type": "ack", "seq": remote_seq})
 
-        # If transformation dropped fields, send a correction delta.
-        # The correction reverts the client's optimistic fields to server values.
+        # Reconcile optimistic client conflicts with server state,
+        # including fields the server removed.
         if not server_ops.is_empty():
             correction = self._compute_correction(client_delta, transformed, server_ops)
             if correction is not None and not correction.is_empty():
@@ -399,6 +399,7 @@ class WebSocketSyncService:
 
         For each entity in the client delta: if the server also changed the
         same fields, drop those fields from the client delta (server wins).
+        Additions and removals conflict just like changes to existing values.
         """
         if server_ops.is_empty():
             return client_delta
@@ -409,17 +410,20 @@ class WebSocketSyncService:
             if server_change is None:
                 continue
 
-            # Drop conflicting fields from client's forward/reverse
-            server_forward_keys = set(server_change.forward_component.keys())
+            # Server-wins includes removals (reverse-only fields), not just values.
+            server_keys = (
+                server_change.reverse_component.keys()
+                | server_change.forward_component.keys()
+            )
             new_forward = {
                 k: v
                 for k, v in change.forward_component.items()
-                if k not in server_forward_keys
+                if k not in server_keys
             }
             new_reverse = {
                 k: v
                 for k, v in change.reverse_component.items()
-                if k not in server_forward_keys
+                if k not in server_keys
             }
             change.forward_component = new_forward
             change.reverse_component = new_reverse
@@ -438,8 +442,9 @@ class WebSocketSyncService:
         """Compute a correction delta for fields the client applied optimistically
         but the server dropped due to conflict.
 
-        The correction tells the client: "for these fields, use the server's
-        value instead of yours." The client receives it as a normal remote delta.
+        The client receives it as a normal remote delta, replacing conflicting
+        optimistic values or absence with the server's values or absence.
+        Return None when no correction is needed.
         """
         correction = Delta()
 
@@ -448,23 +453,32 @@ class WebSocketSyncService:
             if server_change is None:
                 continue
 
-            # Fields the client changed but server also changed (server wins)
-            conflicting_keys = set(change.forward_component.keys()) & set(
-                server_change.forward_component.keys()
+            # Additions and removals affect fields even when forward is empty.
+            conflicting_keys = (
+                change.reverse_component.keys() | change.forward_component.keys()
+            ) & (
+                server_change.reverse_component.keys()
+                | server_change.forward_component.keys()
             )
             if not conflicting_keys:
                 continue
 
-            # Correction: revert client's value → apply server's value
+            # Correction: client's optimistic state → server's state.
+            # An omitted field represents absence, not a null value.
             reverse_component = {
-                k: change.forward_component[k] for k in conflicting_keys
+                k: value
+                for k, value in change.forward_component.items()
+                if k in conflicting_keys
             }
             forward_component = {
-                k: server_change.forward_component[k] for k in conflicting_keys
+                k: value
+                for k, value in server_change.forward_component.items()
+                if k in conflicting_keys
             }
-            correction.add_change(
-                Change(change.entity_id, reverse_component, forward_component)
-            )
+            if reverse_component != forward_component:
+                correction.add_change(
+                    Change(change.entity_id, reverse_component, forward_component)
+                )
 
         return correction if not correction.is_empty() else None
 

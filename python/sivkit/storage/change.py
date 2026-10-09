@@ -24,9 +24,14 @@ class ChangeTypes(Enum):
 class Change:
     """Represents a single entity-level change using forward/reverse deltas.
 
-    - CREATE: reverse_component is empty, forward_component has full state
-    - DELETE: reverse_component has full state, forward_component is empty
-    - UPDATE: both have partial diffs (only changed fields)
+    - CREATE: reverse_component is empty, forward_component has complete entity data
+    - DELETE: reverse_component has complete entity data, forward_component is empty
+    - UPDATE: components contain affected fields before and after the change;
+      either component can be empty for field additions or removals
+    - EMPTY: both components are empty
+
+    A field present only in forward is added; one present only in reverse is
+    removed. None is a value, not absence.
     """
 
     __slots__ = ("entity_id", "reverse_component", "forward_component")
@@ -46,16 +51,16 @@ class Change:
         return [self.entity_id, self.reverse_component, self.forward_component]
 
     def type(self) -> ChangeTypes:
+        """Classify the component shape without validating the entity data."""
         has_reverse = len(self.reverse_component) > 0
         has_forward = len(self.forward_component) > 0
-        if has_reverse and has_forward:
-            return ChangeTypes.UPDATE
-        elif has_reverse:
-            return ChangeTypes.DELETE
-        elif has_forward:
-            return ChangeTypes.CREATE
-        else:
+        if not has_reverse and not has_forward:
             return ChangeTypes.EMPTY
+        if not has_forward and "id" in self.reverse_component:
+            return ChangeTypes.DELETE
+        if not has_reverse and "id" in self.forward_component:
+            return ChangeTypes.CREATE
+        return ChangeTypes.UPDATE
 
     @property
     def change_type(self) -> ChangeTypes:

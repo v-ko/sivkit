@@ -6,6 +6,9 @@ import { clearInMemoryAdapterInstances, RepoUpdateData, VcsAdapterConfig } from 
 import { DummyNote, DummyPage } from "sivkit/storage/test-utils";
 import { createId } from "sivkit/util/base";
 import { clearChannels } from "sivkit/registries/Channel";
+import { InMemoryStore } from "../domain-store/InMemoryStore";
+import { buildHashTree } from "../version-control/HashTree";
+import { dumpToDict } from "../../model/Entity";
 
 // Polyfill navigator.locks for Node test environment (FIFO, non-reentrant)
 {
@@ -41,24 +44,28 @@ const INMEM_PROJECT_STORAGE_CONFIG: VcsAdapterConfig = {
 }
 
 
-// Await the next call after `callsBefore`
-function waitForNextCall<T extends jest.Mock>(
-    fn: T,
-    callsBefore = fn.mock.calls.length,
-    timeoutMs = 5000
-): Promise<Parameters<T>> {
-    return new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms`)), timeoutMs);
-        const poll = () => {
-            if (fn.mock.calls.length > callsBefore) {
-                clearTimeout(t);
-                resolve(fn.mock.calls[fn.mock.calls.length - 1] as Parameters<T>);
-            } else {
-                setTimeout(poll, 0);
-            }
-        };
-        poll();
-    });
+// Arm the callback before committing; await both delivery and the commit result.
+async function commitAndObserve(
+    service: StorageServiceProxy,
+    projectId: string,
+    onUpdate: jest.Mock<void, [RepoUpdateData]>,
+    delta: Delta,
+    message: string,
+) {
+    const delivered = new Promise<RepoUpdateData>(resolve => onUpdate.mockImplementation(resolve));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        const [result, update] = await Promise.race([
+            Promise.all([service.commit(projectId, delta.data, message), delivered]),
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(() => reject(new Error('Commit or update delivery timed out')), 2000);
+            }),
+        ]);
+        return { result, update };
+    } finally {
+        clearTimeout(timer);
+        onUpdate.mockImplementation(() => {});
+    }
 }
 
 
@@ -67,9 +74,17 @@ describe("StorageService base functionality", () => {
     let storageService: StorageServiceProxy;
     let projectId: string;
     let projectStorageConfig: ProjectStorageConfig;
+    let proxies: StorageServiceProxy[];
+
+    function createProxy() {
+        const proxy = new StorageServiceProxy();
+        proxies.push(proxy);
+        return proxy;
+    }
 
     beforeEach(async () => {
-        storageService = new StorageServiceProxy();
+        proxies = [];
+        storageService = createProxy();
         storageService.setupInMainThread();
         projectId = 'test-project-id';
 
@@ -85,7 +100,7 @@ describe("StorageService base functionality", () => {
     });
 
     afterEach(async () => {
-        storageService.disconnect();
+        for (const proxy of proxies) proxy.disconnect();
         clearChannels();
         clearInMemoryAdapterInstances();
         jest.useRealTimers();
@@ -94,7 +109,7 @@ describe("StorageService base functionality", () => {
 
     test("setStateChangeHandler emits initial and updated snapshots", () => {
         const observedStates: StorageProxyState[] = [];
-        const observedService = new StorageServiceProxy();
+        const observedService = createProxy();
 
         observedService.setStateChangeHandler((nextState) => {
             observedStates.push(nextState);
@@ -105,7 +120,6 @@ describe("StorageService base functionality", () => {
         expect(observedStates[0].connectionPhase).toBe('uninitialized');
         expect(observedStates[observedStates.length - 1].connectionPhase).toBe('ready');
 
-        observedService.disconnect();
     });
 
     test("loadProject updates project phase on success and resets it on failure", async () => {
@@ -141,17 +155,6 @@ describe("StorageService base functionality", () => {
 
         const delta = Delta.fromChanges([Change.create(new DummyPage({ id: createId(), parent_id: '', name: "Test Page" }))]);
         await expect(storageService.commit(projectId, delta.data, "Test commit")).rejects.toThrow('commit failed');
-    });
-
-    test("sanity: waitForNextCall resolves for a plain mock invocation", async () => {
-        const fn = jest.fn<void, [any]>();
-
-        const p = waitForNextCall(fn);
-        // Schedule the call in a microtask to avoid timer shenanigans
-        queueMicrotask(() => fn({ ok: true }));
-
-        const [arg] = await p;
-        expect(arg).toEqual({ ok: true });
     });
 
     test("Project load and unload", async () => {
@@ -196,18 +199,12 @@ describe("StorageService base functionality", () => {
         const onUpdate = jest.fn<void, [RepoUpdateData]>();
         await storageService.loadProject(projectId, projectStorageConfig, onUpdate);
 
-        // If loadProject already triggered updates, remember how many
-        const callsBefore = onUpdate.mock.calls.length;
-
         const page = new DummyPage({ id: createId(), parent_id: '', name: "Test Page" });
         const note = new DummyNote({ id: createId(), parent_id: page.id, testProp: "Test Note" });
         const delta = Delta.fromChanges([Change.create(page), Change.create(note)]);
 
-        const commitPromise = storageService.commit(projectId, delta.data, "Test commit");
-
-        // Wait for the *next* callback invocation after commit
-        const [update] = await waitForNextCall(onUpdate, callsBefore);
-        await expect(commitPromise).resolves.toMatchObject({
+        const { result, update } = await commitAndObserve(storageService, projectId, onUpdate, delta, "Test commit");
+        expect(result).toMatchObject({
             type: 'commit',
             commit: expect.objectContaining({
                 message: 'Test commit',
@@ -215,19 +212,15 @@ describe("StorageService base functionality", () => {
             }),
         });
 
-        // Assertions based on StorageService._executeCommitRequest()
-        expect(update).toBeDefined();
-        expect(update.upsertedCommits).toBeDefined();
-        expect(update.upsertedCommits!.length).toBe(1);
-        expect(update.upsertedCommits![0].message).toBe("Test commit");
-
-        const newEntities = Object.values(update.upsertedCommits![0].delta_data!);
-        expect(newEntities.length).toBe(2);
+        expect(update.upsertedCommits).toEqual([result.commit]);
+        expect(update.commitGraph.branches).toEqual([
+            { name: 'dev1', head_commit_id: result.commit.id },
+        ]);
     });
 
     test("addons get each commit and messages by name", async () => {
         const committed: string[] = [];
-        const addonService = new StorageServiceProxy();
+        const addonService = createProxy();
         addonService.setupInMainThread([
             {
                 name: 'failing', create: () => ({
@@ -254,7 +247,6 @@ describe("StorageService base functionality", () => {
 
         await expect(addonService.sendToAddon(projectId, 'recorder', 'hi')).resolves.toEqual({ echo: 'hi' });
         await expect(addonService.sendToAddon(projectId, 'failing', 'hi')).rejects.toThrow();
-        addonService.disconnect();
     });
 
     test('File operations', async () => {
@@ -284,88 +276,48 @@ describe("StorageService base functionality", () => {
         await expect(storageService.getFile(projectId, result.path)).rejects.toThrow();
     });
     test("Squash old prefix commits by TTL", async () => {
-        // Create and load project
         await storageService.createProject(projectId, projectStorageConfig);
-
         const onUpdate = jest.fn<void, [RepoUpdateData]>();
         await storageService.loadProject(projectId, projectStorageConfig, onUpdate);
-
-        const callsBefore = onUpdate.mock.calls.length;
-
-        // Control time to make the first two commits "old" relative to the third one
         const day = 24 * 60 * 60 * 1000;
-        let now = 1_700_000_000_000; // arbitrary fixed base
-        const nowSpy = jest.spyOn(Date, "now").mockImplementation(() => now);
+        let now = 1_700_000_000_000;
+        jest.spyOn(Date, "now").mockImplementation(() => now);
 
-        // Commit 0: create a page
+        // The old prefix creates a page and its child.
         const page = new DummyPage({ id: createId(), parent_id: "", name: "P0" });
         const delta0 = Delta.fromChanges([Change.create(page)]);
-        storageService.commit(projectId, delta0.data, "c0");
-        const [u0] = await waitForNextCall(onUpdate, callsBefore);
+        const { result: c0 } = await commitAndObserve(storageService, projectId, onUpdate, delta0, "c0");
 
-        const commits0 = u0.commitGraph.commits;
-        expect(commits0.length).toBe(1);
-        const c0Id = commits0[0].id;
-
-        // Commit 1: create a note under the page (still "old")
-        now = now + 1; // slightly after c0
+        now += 1;
         const note1 = new DummyNote({ id: createId(), parent_id: page.id, testProp: "N1" });
         const delta1 = Delta.fromChanges([Change.create(note1)]);
-        storageService.commit(projectId, delta1.data, "c1");
-        const [u1] = await waitForNextCall(onUpdate, onUpdate.mock.calls.length);
+        const { result: c1, update: beforeSquash } = await commitAndObserve(storageService, projectId, onUpdate, delta1, "c1");
+        expect(beforeSquash.commitGraph.commits.map(c => c.id)).toEqual([c0.commit.id, c1.commit.id]);
 
-        const commits1 = u1.commitGraph.commits;
-        expect(commits1.length).toBe(2);
-
-        // Identify c1 = the child of c0
-        const c1Meta = commits1.find(c => c.parent_id === c0Id)!;
-        expect(c1Meta).toBeDefined();
-        const c1Id = c1Meta.id;
-
-        // Commit 2: advance time past the TTL so [c0..c1] are old and get squashed into c0
-        now = now + 3 * day; // ensure cutoff >= c1.timestamp
+        // A recent commit triggers squash; c1 retains the old prefix's net delta.
+        now += 3 * day;
         const note2 = new DummyNote({ id: createId(), parent_id: page.id, testProp: "N2" });
         const delta2 = Delta.fromChanges([Change.create(note2)]);
-        storageService.commit(projectId, delta2.data, "c2");
-        const [u2] = await waitForNextCall(onUpdate, onUpdate.mock.calls.length);
+        const { result: c2, update } = await commitAndObserve(storageService, projectId, onUpdate, delta2, "c2");
+        expect(new Map(update.commitGraph.commits.map(c => [c.id, c.parent_id]))).toEqual(new Map([
+            [c1.commit.id, ''], [c2.commit.id, c1.commit.id],
+        ]));
+        expect(update.commitGraph.branches).toEqual([{ name: 'dev1', head_commit_id: c2.commit.id }]);
 
-        const commits2 = u2.commitGraph.commits;
+        const commits = await storageService.getCommits(projectId, [c1.commit.id, c2.commit.id]);
+        expect(commits[0].delta_data).toEqual({ ...delta0.data, ...delta1.data });
+        expect(commits[0].snapshot_hash).toBe(c1.commit.snapshot_hash);
+        expect(commits[1]).toEqual(c2.commit);
+        expect(update.upsertedCommits).toEqual(expect.arrayContaining(commits));
 
-        // After squash (new logic): commits should be [c1(updated with c0's parent and aggregated delta), c2]
-        // The new squash logic deletes c0 and updates c1 to have c0's parent and aggregated content
-        expect(commits2.length).toBe(2);
-
-        // Debug: let's see what we actually got
-        console.log('Commits after c2:', commits2.map(c => ({ id: c.id, parentId: c.parent_id, timestamp: c.timestamp })));
-        console.log('Expected c0Id:', c0Id, 'c1Id:', c1Id);
-
-        // c0 should be deleted after squash
-        const c0AfterSquash = commits2.find(c => c.id === c0Id);
-        expect(c0AfterSquash).toBeUndefined();
-
-        // c1 should be updated with c0's parent (empty string) and aggregated delta
-        const c1Updated = commits2.find(c => c.id === c1Id)!;
-        expect(c1Updated).toBeDefined();
-        expect(c1Updated.parent_id).toBe(''); // Should now have c0's parent (empty string)
-
-        // c2 should remain unchanged - find it by looking for commit that's not c1
-        const c2AfterSquash = commits2.find(c => c.id !== c1Id)!;
-        expect(c2AfterSquash).toBeDefined();
-        expect(c2AfterSquash.parent_id).toBe(c1Id); // Still points to c1
-        const c2Id = c2AfterSquash.id;
-
-        // The commit IDs should be c1 and c2
-        const commitIds2 = new Set(commits2.map(c => c.id));
-        expect(commitIds2.has(c0Id)).toBe(false); // c0 removed
-        expect(commitIds2.has(c1Id)).toBe(true);  // c1 kept (updated)
-        expect(commitIds2.has(c2Id)).toBe(true);  // c2 kept
-
-        // Head should still point to c2
-        const headId = u2.commitGraph.branches.find(b => b.name === "dev1")!.head_commit_id!;
-        expect(headId).toBe(c2Id);
-
-        // Cleanup of Date.now spy handled by afterEach via jest.restoreAllMocks()
-        nowSpy.mockRestore();
+        const replayed = new InMemoryStore();
+        replayed.applyDelta(new Delta(commits[0].delta_data));
+        expect(replayed.data()).toEqual({ entities: [dumpToDict(page), dumpToDict(note1)] });
+        replayed.applyDelta(new Delta(commits[1].delta_data));
+        expect(replayed.data()).toEqual({
+            entities: [dumpToDict(page), dumpToDict(note1), dumpToDict(note2)],
+        });
+        expect((await buildHashTree(replayed)).rootHash()).toBe(c2.commit.snapshot_hash);
     });
 
 });

@@ -4,6 +4,8 @@ Modes:
   --export <db_path>   Export entities from a SQLite VCS database
   --fuzz [--seed N]    Generate random entities + deltas for fuzz testing
 
+Outputs a JSON array containing one named test case.
+
 The fuzz fixture exercises both buildHashTree (from initial entities) and
 updateHashTree (from deltas applied sequentially). Deltas cover:
   - CREATE new entities
@@ -324,6 +326,7 @@ def generate_fuzz_fixture(seed: int, entity_count: int, delta_count: int) -> dic
             deltas.append(delta_data)
 
     return {
+        "name": f"fuzz-{seed}",
         "description": f"Fuzz fixture (seed={seed}, entities={entity_count}, deltas={delta_count})",
         "entities": initial_entities,
         "deltas": deltas,
@@ -353,6 +356,7 @@ def export_from_db(db_path: str, branch: str = "main") -> dict:
         entities.append(dump_to_dict(entity))
 
     return {
+        "name": f"export-{Path(db_path).stem}-{branch}",
         "description": f"Exported from {Path(db_path).name}, branch={branch}, commits={len(commits)}",
         "entities": entities,
     }
@@ -381,7 +385,7 @@ def main():
     else:
         fixture = generate_fuzz_fixture(args.seed, args.count, args.deltas)
 
-    json.dump(fixture, sys.stdout, indent=2, ensure_ascii=False)
+    json.dump([fixture], sys.stdout, indent=2, ensure_ascii=False)
     print()  # trailing newline
 
 

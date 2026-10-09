@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.1 - 2026-10-09
+
+- (py/ts) UPDATE deltas remove fields present only in the reverse component; `null` remains an explicit value. Composition preserves this distinction.
+
 ## 0.12.0 - 2026-10-04
 
 - Guideline: SQLAlchemy instead of peewee (`docs/adr/101`).

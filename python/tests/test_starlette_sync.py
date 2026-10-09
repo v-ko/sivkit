@@ -24,7 +24,10 @@ def _client(sync: WebSocketSyncService) -> TestClient:
 def _close(session, sync: WebSocketSyncService) -> None:
     # TestClient cancels the handler on exit, racing the disconnect; let the session end first.
     session.close()
+    deadline = time.monotonic() + 2
     while sync.running:
+        if time.monotonic() >= deadline:
+            pytest.fail("WebSocket sync session did not stop after disconnect")
         time.sleep(0.001)
 
 

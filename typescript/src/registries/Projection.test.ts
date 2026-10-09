@@ -5,11 +5,14 @@ import { action } from "./Action";
 import { isInProjection, registerProjection } from "./Projection";
 
 describe("registerProjection", () => {
+    let unregister: (() => void) | undefined;
+    afterEach(() => unregister?.());
+
     test("projects each root action's merged changes, one projection per store", () => {
         const store = new InMemoryStore(indexConfigs);
         const page = (id: string) => new DummyPage({ id, parent_id: '', name: id });
         const projected: Delta[] = [];
-        const unregister = registerProjection(store, (delta, projectedStore) => {
+        unregister = registerProjection(store, (delta, projectedStore) => {
             expect(isInProjection()).toBe(true);
             expect(projectedStore).toBe(store);
             projected.push(delta);
@@ -33,6 +36,6 @@ describe("registerProjection", () => {
         expect(projected[1].isEmpty()).toBe(true);
 
         unregister();
-        registerProjection(store, () => {})();
+        unregister = registerProjection(store, () => {});
     });
 });

@@ -50,8 +50,8 @@ async def test_procedure_fire_and_forget():
 
 
 @pytest.mark.asyncio
-async def test_procedure_exception_is_logged(caplog):
-    """Unhandled exceptions in procedures are logged, not silently lost."""
+async def test_procedure_exception_propagates_when_awaited():
+    """Awaiting a procedure raises its exception to the caller."""
 
     @procedure
     async def failing():

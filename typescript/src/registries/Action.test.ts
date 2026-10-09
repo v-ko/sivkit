@@ -9,21 +9,24 @@ type Call = { root: ActionState; changes: DomainStoreChange[] };
 describe("registerRootActionChangesHandler", () => {
     let store: InMemoryStore;
     let calls: Call[];
+    let cleanups: (() => void)[];
     let unregister: () => void;
 
     beforeEach(() => {
         store = new InMemoryStore(indexConfigs);
         calls = [];
         unregister = registerRootActionChangesHandler(store, (root, changes) => calls.push({ root, changes }));
+        cleanups = [unregister];
     });
 
-    afterEach(() => unregister());
+    afterEach(() => cleanups.reverse().forEach(cleanup => cleanup()));
 
     const page = (id: string) => new DummyPage({ id, parent_id: '', name: id });
 
     test("records each root action's changes and enforces actions while registered", () => {
         const other: DomainStoreChange[][] = [];
         const unregisterOther = registerRootActionChangesHandler(store, (_r, changes) => other.push(changes));
+        cleanups.push(unregisterOther);
         const fired: Delta[] = [];
         store.addOnChangesCallback(d => fired.push(d));
 

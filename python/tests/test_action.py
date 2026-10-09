@@ -30,72 +30,38 @@ def _clear_action_state():
     _projections.clear()
 
 
-def test_action_runs_and_returns_value():
+@pytest.fixture(autouse=True)
+def action_state():
     _clear_action_state()
+    try:
+        yield
+    finally:
+        _clear_action_state()
 
-    @action("test.basic")
+
+@pytest.mark.parametrize(
+    "options,issuer",
+    [({}, "user"), ({"issuer": "service"}, "service")],
+    ids=["default issuer", "custom issuer"],
+)
+def test_action_returns_value_and_reports_completed_state(options, issuer):
+    received = []
+    register_root_action_completed_hook(lambda s: received.append(s))
+
+    @action("test.add", **options)
     def add(a, b):
         return a + b
 
     assert add(2, 3) == 5
-
-
-def test_default_issuer_is_user():
-    _clear_action_state()
-    received = []
-    register_root_action_completed_hook(lambda s: received.append(s))
-
-    @action("test.issuer_default")
-    def noop():
-        pass
-
-    noop()
-    assert received[0].issuer == "user"
-
-
-def test_custom_issuer():
-    _clear_action_state()
-    received = []
-    register_root_action_completed_hook(lambda s: received.append(s))
-
-    @action("test.issuer_custom", issuer="service")
-    def noop():
-        pass
-
-    noop()
-    assert received[0].issuer == "service"
-
-
-def test_action_state_is_completed():
-    _clear_action_state()
-    received = []
-    register_root_action_completed_hook(lambda s: received.append(s))
-
-    @action("test.completed")
-    def noop():
-        pass
-
-    noop()
+    assert len(received) == 1
+    assert received[0].issuer == issuer
+    assert received[0].name == f"[{issuer}]test.add"
     assert received[0].run_state == ActionRunStates.COMPLETED
     assert received[0].duration >= 0
-
-
-def test_issuer_parsed_from_name():
-    _clear_action_state()
-    received = []
-    register_root_action_completed_hook(lambda s: received.append(s))
-
-    @action("test.name_check", issuer="myservice")
-    def noop():
-        pass
-
-    noop()
-    assert received[0].name == "[myservice]test.name_check"
-    assert received[0].issuer == "myservice"
+    assert _action_call_stack == []
 
 
 def test_nested_actions_only_fire_root_hooks():
-    _clear_action_state()
     started = []
     completed = []
     register_root_action_started_hook(lambda s: started.append(s.name))
@@ -116,25 +82,10 @@ def test_nested_actions_only_fire_root_hooks():
     assert started[0] == "[user]test.outer"
     assert len(completed) == 1
     assert completed[0] == "[user]test.outer"
-
-
-def test_stack_is_empty_after_nested_call():
-    _clear_action_state()
-
-    @action("test.inner2")
-    def inner():
-        pass
-
-    @action("test.outer2")
-    def outer():
-        inner()
-
-    outer()
-    assert len(_action_call_stack) == 0
+    assert _action_call_stack == []
 
 
 def test_exception_sets_failed_and_reraises():
-    _clear_action_state()
     completed = []
     register_root_action_completed_hook(lambda s: completed.append(s))
 
@@ -147,23 +98,10 @@ def test_exception_sets_failed_and_reraises():
 
     assert len(completed) == 1
     assert completed[0].run_state == ActionRunStates.FAILED
-
-
-def test_stack_is_clean_after_error():
-    _clear_action_state()
-
-    @action("test.failing2")
-    def failing():
-        raise RuntimeError("oops")
-
-    with pytest.raises(RuntimeError):
-        failing()
-
-    assert len(_action_call_stack) == 0
+    assert _action_call_stack == []
 
 
 def test_nested_error_propagates_and_root_hooks_fire():
-    _clear_action_state()
     completed = []
     register_root_action_completed_hook(lambda s: completed.append(s))
 
@@ -184,41 +122,23 @@ def test_nested_error_propagates_and_root_hooks_fire():
     assert len(_action_call_stack) == 0
 
 
-def test_is_in_action_false_outside():
-    _clear_action_state()
+def test_action_scope_and_mutation_guard():
     assert is_in_action() is False
+    with pytest.raises(Exception, match="@action"):
+        check_in_action()
 
+    @action("test.guard_inside")
+    def guarded():
+        assert is_in_action() is True
+        check_in_action()
 
-def test_is_in_action_true_inside():
-    _clear_action_state()
-    observed = []
-
-    @action("test.check_inside")
-    def check():
-        observed.append(is_in_action())
-
-    check()
-    assert observed == [True]
-
-
-def test_check_in_action_raises_outside():
-    _clear_action_state()
+    guarded()
+    assert is_in_action() is False
     with pytest.raises(Exception, match="@action"):
         check_in_action()
 
 
-def test_check_in_action_passes_inside():
-    _clear_action_state()
-
-    @action("test.guard_inside")
-    def guarded():
-        check_in_action()  # should not raise
-
-    guarded()  # no exception
-
-
 def test_started_before_body_completed_after():
-    _clear_action_state()
     events = []
     register_root_action_started_hook(lambda s: events.append("started"))
     register_root_action_completed_hook(lambda s: events.append("completed"))
@@ -241,7 +161,6 @@ def _create_delta(entity):
 
 
 def test_root_action_changes_handler():
-    _clear_action_state()
     store = InMemoryStore()
     calls, other, fired = [], [], []
     unregister = register_root_action_changes_handler(
@@ -295,7 +214,6 @@ def test_root_action_changes_handler():
 
 
 def test_throwing_callback_rolls_back_and_earlier_callbacks_see_the_revert():
-    _clear_action_state()
     store = InMemoryStore()
     calls = []
     register_root_action_changes_handler(
@@ -324,7 +242,6 @@ def test_throwing_callback_rolls_back_and_earlier_callbacks_see_the_revert():
 
 
 def test_projection():
-    _clear_action_state()
     store = InMemoryStore()
     projected = []
 
@@ -356,7 +273,6 @@ def test_projection():
 
 
 def test_sync_remote_apply_is_in_action_only_when_required():
-    _clear_action_state()
     store = InMemoryStore()
     service = WebSocketSyncService(store, role="receiver")
     first = _ActionTestEntity()

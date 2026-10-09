@@ -18,7 +18,8 @@ describe("InMemoryStore", () => {
 
         // Test insert
         let changeCreate = store.insertOne(entity);
-        expect(changeCreate).toBeDefined();
+        expect(changeCreate.isCreate()).toBe(true);
+        expect(store.findOne({ id: entity.id })).toEqual(entity);
 
         let all_entities = [...store.find()];
         expect(all_entities.length).toBe(1);
@@ -26,12 +27,14 @@ describe("InMemoryStore", () => {
         // Test update
         entity.name = "456";
         let changeUpdate = store.updateOne(entity);
-        expect(changeUpdate).toBeDefined();
+        expect(changeUpdate.reverseComponent).toEqual({ name: "Test Page" });
+        expect(changeUpdate.forwardComponent).toEqual({ name: "456" });
+        expect((store.findOne({ id: entity.id }) as DummyPage).name).toBe("456");
         expect([...store.find()].length).toBe(1);
 
         // Test delete
         let changeDelete = store.removeOne(entity);
-        expect(changeDelete).toBeDefined();
+        expect(changeDelete.isDelete()).toBe(true);
         expect([...store.find()].length).toBe(0);
     });
 
@@ -99,30 +102,17 @@ describe("InMemoryStore", () => {
             store.insertOne(note2),
         ]
 
-        note2._data.testProp = "Updated Note 2";
-
-        // Check that the repo has copied the entity (so that alterations cannot
-        // leak over the repo interface)
-        let repoNote2 = store.findOne({ id: "789" });
-        expect((repoNote2 as DummyNote)._data.testProp).toBe("Test Note 2");
-
-        let delta = Delta.fromChanges(changes);
+        note2.testProp = "Updated Note 2";
 
         let changeDelete = store.removeOne(note1);
         changes.push(changeDelete);
 
-        delta = Delta.fromChanges(changes);
-
         let changeUpdate = store.updateOne(note2);
         changes.push(changeUpdate);
+        expect([...store.find()]).toEqual([page, note2]);
 
-        delta = Delta.fromChanges(changes);
-        delta = delta.reversed()
-
-        let reverseChanges = delta.changes();
-        for (let change of reverseChanges) {
-            store.applyChange(change);
-        }
+        const delta = Delta.fromChanges(changes);
+        store.applyDelta(delta.reversed());
 
         let all_entities = [...store.find()];
         expect(all_entities.length).toBe(0);
@@ -145,5 +135,12 @@ describe("InMemoryStore", () => {
         expect(change.isEmpty()).toBe(false);
         expect(deltas.length).toBe(1);
         expect((store.findOne({ id: "copy-test" }) as DummyPage)._data.name).toBe("Mutated");
+
+        page.name = "Changed after update";
+        expect((store.findOne({ id: "copy-test" }) as DummyPage).name).toBe("Mutated");
+        stored = store.findOne({ id: "copy-test" }) as DummyPage;
+        stored.name = "Changed after find";
+        expect((store.findOne({ id: "copy-test" }) as DummyPage).name).toBe("Mutated");
+        expect(deltas.length).toBe(1);
     });
 });

@@ -1,0 +1,93 @@
+[
+  {
+    "name": "known-entity-data-control",
+    "entities": [{"id":"page","parent_id":"","type_name":"TestPage","name":"first"}],
+    "deltas": [
+      {"page":["page",{"name":"first"},{"name":"second"}]},
+      {"page":["page",{"name":"second"},{"name":"third"}]}
+    ],
+    "expected_states": [
+      [{"id":"page","parent_id":"","type_name":"TestPage","name":"first"}],
+      [{"id":"page","parent_id":"","type_name":"TestPage","name":"second"}],
+      [{"id":"page","parent_id":"","type_name":"TestPage","name":"third"}]
+    ],
+    "check_composition": true
+  },
+  {
+    "name": "unknown-field",
+    "entities": [{"id":"page","parent_id":"","type_name":"TestPage","name":"first","extra":{"items":[1,null,"kept"]}}],
+    "deltas": [{"page":["page",{"name":"first"},{"name":"second"}]}],
+    "expected_states": [
+      [{"id":"page","parent_id":"","type_name":"TestPage","name":"first","extra":{"items":[1,null,"kept"]}}],
+      [{"id":"page","parent_id":"","type_name":"TestPage","name":"second","extra":{"items":[1,null,"kept"]}}]
+    ],
+    "check_composition": true
+  },
+  {
+    "name": "missing-optional-field",
+    "entities": [{"id":"page","parent_id":"","type_name":"TestPage"}],
+    "expected_states": [[{"id":"page","parent_id":"","type_name":"TestPage"}]]
+  },
+  {
+    "name": "explicit-null",
+    "entities": [{"id":"page","parent_id":"","type_name":"TestPage","name":null}],
+    "deltas": [{"page":["page",{"name":null},{"name":"second"}]}],
+    "expected_states": [
+      [{"id":"page","parent_id":"","type_name":"TestPage","name":null}],
+      [{"id":"page","parent_id":"","type_name":"TestPage","name":"second"}]
+    ],
+    "check_composition": true
+  },
+  {
+    "name": "unknown-type",
+    "entities": [],
+    "deltas": [
+      {"future":["future",{},{"id":"future","parent_id":"","type_name":"FutureEntity","payload":{"answer":42}}]},
+      {"future":["future",{"payload":{"answer":42}},{"payload":null}]}
+    ],
+    "expected_states": [
+      [],
+      [{"id":"future","parent_id":"","type_name":"FutureEntity","payload":{"answer":42}}],
+      [{"id":"future","parent_id":"","type_name":"FutureEntity","payload":null}]
+    ],
+    "check_composition": true
+  },
+  {
+    "name": "remove-and-readd-field",
+    "entities": [{"id":"page","parent_id":"","type_name":"TestPage","name":"first"}],
+    "deltas": [
+      {"page":["page",{"name":"first"},{}]},
+      {"page":["page",{},{"name":null}]}
+    ],
+    "expected_states": [
+      [{"id":"page","parent_id":"","type_name":"TestPage","name":"first"}],
+      [{"id":"page","parent_id":"","type_name":"TestPage"}],
+      [{"id":"page","parent_id":"","type_name":"TestPage","name":null}]
+    ],
+    "check_composition": true
+  },
+  {
+    "name": "remove-null-field",
+    "entities": [{"id":"page","parent_id":"","type_name":"TestPage","name":null}],
+    "deltas": [{"page":["page",{"name":null},{}]}],
+    "expected_states": [
+      [{"id":"page","parent_id":"","type_name":"TestPage","name":null}],
+      [{"id":"page","parent_id":"","type_name":"TestPage"}]
+    ],
+    "check_composition": true
+  },
+  {
+    "name": "remove-field-with-other-update",
+    "entities": [{"id":"note","parent_id":"","type_name":"TestNote","x":0,"y":0,"width":0,"height":0,"content":"first","color":[],"tags":["old"]}],
+    "deltas": [
+      {"note":["note",{"tags":["old"],"content":"first"},{"content":"second"}]},
+      {"note":["note",{"content":"second"},{"tags":["new"],"content":"third"}]}
+    ],
+    "expected_states": [
+      [{"id":"note","parent_id":"","type_name":"TestNote","x":0,"y":0,"width":0,"height":0,"content":"first","color":[],"tags":["old"]}],
+      [{"id":"note","parent_id":"","type_name":"TestNote","x":0,"y":0,"width":0,"height":0,"content":"second","color":[]}],
+      [{"id":"note","parent_id":"","type_name":"TestNote","x":0,"y":0,"width":0,"height":0,"content":"third","color":[],"tags":["new"]}]
+    ],
+    "check_composition": true
+  }
+]

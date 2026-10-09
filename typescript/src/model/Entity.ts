@@ -215,6 +215,7 @@ export function entityKeysAreEqual(value1: any, value2: any, depth = 1): boolean
     return true;
 }
 
+/** Return a new entity with an UPDATE applied, including field removals. */
 export function transformedEntity(entity: Entity<EntityData>, change: Change){
     if (entity.id !== change.entityId) {
         throw new Error('Cannot apply delta from different entities');
@@ -224,7 +225,12 @@ export function transformedEntity(entity: Entity<EntityData>, change: Change){
         throw new Error('Cannot apply delta that is not an update');
     }
 
-    const forwardDelta = change.forwardComponent;
-    let newData = { ...dumpToDict(entity), ...forwardDelta };
+    const newData = dumpToDict(entity) as SerializedEntityData & Record<string, unknown>;
+    for (const key of Object.keys(change.reverseComponent)) {
+        if (!Object.prototype.hasOwnProperty.call(change.forwardComponent, key)) {
+            delete newData[key];
+        }
+    }
+    Object.assign(newData, change.forwardComponent);
     return loadFromDict(newData);
 }

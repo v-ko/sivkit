@@ -180,65 +180,48 @@ describe("HashTree", () => {
     });
 
     test("Full lifecycle: create, update, delete via deltas with reverse", async () => {
-        let store = new InMemoryStore();
+        const store = new InMemoryStore();
+        const tree = await buildHashTree(store);
+        const emptyHash = tree.rootHash();
+        const page = new DummyPage({ id: 'p1', parent_id: '', name: 'P1' });
+        const note = new DummyNote({ id: 'n1', parent_id: 'p1', testProp: 'original' });
+        const modified = note.copy();
+        modified.testProp = 'modified';
 
-        // Create
-        let page = new DummyPage({ id: 'p1', parent_id: '', name: 'P1' });
-        let note = new DummyNote({ id: 'n1', parent_id: 'p1', testProp: 'original' });
-        let createChanges = [store.insertOne(page), store.insertOne(note)];
-        let createDelta = Delta.fromChanges(createChanges);
+        async function apply(delta: Delta) {
+            store.applyDelta(delta);
+            await updateHashTree(tree, store, delta);
+            expect(tree.rootHash()).toEqual((await buildHashTree(store)).rootHash());
+        }
 
-        let tree = new HashTree();
-        await updateHashTree(tree, store, createDelta);
-        let afterCreate = tree.rootHash();
+        const create = Delta.fromChanges([Change.create(page), Change.create(note)]);
+        await apply(create);
+        const afterCreate = tree.rootHash();
+        expect((store.findOne({ id: 'n1' }) as DummyNote).testProp).toBe('original');
 
-        // Update the note
-        let noteOld = store.findOne({ id: 'n1' })!;
-        let noteNew = noteOld.copy() as DummyNote;
-        noteNew.testProp = 'modified';
-        let updateChange = Change.update(noteOld, noteNew);
-        store.updateOne(noteNew);
-        let updateDelta = Delta.fromChanges([updateChange]);
-        await updateHashTree(tree, store, updateDelta);
-        let afterUpdate = tree.rootHash();
+        const update = Delta.fromChanges([Change.update(note, modified)]);
+        await apply(update);
+        const afterUpdate = tree.rootHash();
         expect(afterUpdate).not.toEqual(afterCreate);
+        expect((store.findOne({ id: 'n1' }) as DummyNote).testProp).toBe('modified');
 
-        // Delete the note
-        let noteForDelete = store.findOne({ id: 'n1' })!;
-        let deleteDelta = Delta.fromChanges([store.removeOne(noteForDelete)]);
-        await updateHashTree(tree, store, deleteDelta);
-        let afterDelete = tree.rootHash();
-        expect(afterDelete).not.toEqual(afterUpdate);
+        const remove = Delta.fromChanges([Change.delete(modified)]);
+        await apply(remove);
+        expect(store.findOne({ id: 'n1' })).toBeUndefined();
+        expect(store.findOne({ id: 'p1' })).toEqual(page);
+        expect(tree.rootHash()).not.toEqual(afterUpdate);
 
-        // Reverse all three deltas to get back to empty
-        // Apply in reverse order: undo delete, undo update, undo create
+        await apply(remove.reversed());
+        expect((store.findOne({ id: 'n1' }) as DummyNote).testProp).toBe('modified');
+        expect(tree.rootHash()).toEqual(afterUpdate);
 
-        // Undo delete (re-insert note)
-        let undoDelete = deleteDelta.reversed();
-        // We need to re-insert the entity in the store for updateHashTree to find it
-        store.insertOne(noteForDelete);
-        await updateHashTree(tree, store, undoDelete);
+        await apply(update.reversed());
+        expect((store.findOne({ id: 'n1' }) as DummyNote).testProp).toBe('original');
+        expect(tree.rootHash()).toEqual(afterCreate);
 
-        // Undo update (revert note prop)
-        let undoUpdate = updateDelta.reversed();
-        // Revert in store: current is 'original' (re-inserted), target is 'modified' old state
-        // Actually the reversed delta's forward component restores the old state
-        let currentNote = store.findOne({ id: 'n1' })!;
-        let revertedNote = currentNote.copy() as DummyNote;
-        revertedNote.testProp = 'modified';
-        store.updateOne(revertedNote);
-        await updateHashTree(tree, store, undoUpdate);
-
-        // Undo create (remove both entities)
-        let undoCreate = createDelta.reversed();
-        store.removeOne(store.findOne({ id: 'n1' })!);
-        store.removeOne(store.findOne({ id: 'p1' })!);
-        await updateHashTree(tree, store, undoCreate);
-
-        // Should be back to empty tree hash
-        let emptyTree = new HashTree();
-        await emptyTree.updateRootHash();
-        expect(tree.rootHash()).toEqual(emptyTree.rootHash());
+        await apply(create.reversed());
+        expect([...store.find()]).toEqual([]);
+        expect(tree.rootHash()).toEqual(emptyHash);
     });
 
     test("updateHashTree handles reparenting (parent_id change in UPDATE)", async () => {

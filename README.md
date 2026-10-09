@@ -285,6 +285,9 @@ Column {
 - Python: `cd python && pytest`
 - TypeScript: `cd typescript && npm test` (Jest)
 - Cross-language hash parity: `bash tests/hash-parity/run.sh`, which checks that the Python and TS hash trees produce the same root hashes
+- Serialized entity hash parity and replay: `PYTHON=../dev_venv/bin/python bash tests/hash-parity/run.sh tests/hash-parity/fixtures/entity-data-semantics.json`, which checks exact serialized entity data, checkpoint hashes, and composed/sequential undo.
+
+Parity fixture files are JSON arrays of test cases. Generated fuzz and database exports contain one named case; regression fixtures contain several. Both language runners execute every case.
 
 Since every state change passes through actions, a session can in principle be recorded (root actions plus the view state they touched) and replayed as a test. This is planned, see [docs/ui-testing-via-action-replay.md](docs/ui-testing-via-action-replay.md).
 
@@ -415,6 +418,8 @@ In TS `@command(title, enablement)` takes an enablement condition that the app e
 
 ### Storage and version control
 Every change to a domain store is already a delta, so keeping the history is just a matter of keeping the deltas. SivKit's version control does exactly that: a commit is a delta, a branch is a chain of them, and replaying a branch gives you the state. Pamet uses it both for syncing (between tabs, and with the server) and for tracking the full change history of a project. Saving, syncing and rolling back all come down to the same move: compare commit graphs, fetch what's missing, apply it.
+
+See the shared [delta protocol](docs/delta-protocol.md) for change semantics and replay rules.
 
 It is modeled on git (commits, branches, a head), but commits are not content-addressed: ids are random, and the hash chain git relies on is absent. That keeps the per-action histories cheap to squash without rewriting everything after them. A snapshot hash of the resulting state is still recorded with each commit, as an integrity check.
 

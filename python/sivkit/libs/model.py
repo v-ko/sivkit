@@ -175,8 +175,11 @@ class Entity:
 
     def change_from(self, other: "Entity"):
         """Compute a Change between self (old) and other (new).
+
         Granularity: level-1 entity properties. If a level-1 key's value
-        has changed, the whole key is included in the delta."""
+        has changed, the whole value is included in the delta. Added fields
+        appear only in forward; removed fields appear only in reverse.
+        """
         from sivkit.storage.change import Change
 
         if self.id != other.id:
@@ -190,18 +193,27 @@ class Entity:
 
         all_keys = set(old_state.keys()) | set(new_state.keys())
         for key in all_keys:
-            old_val = old_state.get(key)
-            new_val = new_state.get(key)
-            if old_val != new_val:
-                reverse_delta[key] = old_val
-                forward_delta[key] = new_val
+            if (
+                key in old_state
+                and key in new_state
+                and old_state[key] == new_state[key]
+            ):
+                continue
+            if key in old_state:
+                reverse_delta[key] = old_state[key]
+            if key in new_state:
+                forward_delta[key] = new_state[key]
 
         return Change(self.id, reverse_delta, forward_delta)
 
 
 def transformed_entity(entity: Entity, change) -> Entity:
-    """Apply a Change's forward component to an entity, producing a new entity.
-    Only works with UPDATE changes."""
+    """Return a new entity with an UPDATE applied, leaving the source unchanged.
+
+    Reverse-only fields are removed and forward fields assigned. The resulting
+    entity is loaded through its model, so model defaults still apply to omitted
+    fields.
+    """
     from sivkit.storage.change import ChangeTypes
 
     if entity.id != change.entity_id:
@@ -209,5 +221,8 @@ def transformed_entity(entity: Entity, change) -> Entity:
     if change.type() != ChangeTypes.UPDATE:
         raise ValueError("Can only apply UPDATE changes via transformed_entity")
 
-    new_dict = {**dump_to_dict(entity), **change.forward_component}
+    new_dict = dump_to_dict(entity)
+    for key in change.reverse_component.keys() - change.forward_component.keys():
+        new_dict.pop(key, None)
+    new_dict.update(change.forward_component)
     return load_from_dict(new_dict)

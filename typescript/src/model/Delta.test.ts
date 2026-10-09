@@ -1,6 +1,41 @@
 import { Delta, DeltaData, squashDeltas } from "./Delta";
-import { ChangeType } from "./Change";
+import { Change, ChangeType } from "./Change";
 import { DummyPage } from "../storage/test-utils";
+
+const entityData = { id: "e", parent_id: "", type_name: "DummyPage" };
+
+describe("Change classification", () => {
+    const cases: [string, Record<string, unknown>, Record<string, unknown>, ChangeType][] = [
+        ["empty", {}, {}, ChangeType.EMPTY],
+        ["create complete entity data", {}, { id: "e", parent_id: "", type_name: "DummyPage", name: "page" }, ChangeType.CREATE],
+        ["delete complete entity data", { id: "e", parent_id: "", type_name: "DummyPage", name: "page" }, {}, ChangeType.DELETE],
+        ["add field", {}, { name: "page" }, ChangeType.UPDATE],
+        ["remove field", { name: "page" }, {}, ChangeType.UPDATE],
+        ["absent to null", {}, { name: null }, ChangeType.UPDATE],
+        ["null to absent", { name: null }, {}, ChangeType.UPDATE],
+        ["create classification does not validate id", {}, { ...entityData, id: "other" }, ChangeType.CREATE],
+        ["delete classification does not validate id", { ...entityData, id: "other" }, {}, ChangeType.DELETE],
+    ];
+
+    test.each(cases)("%s", (_, reverse, forward, expectedType) => {
+        expect(new Change(["e", reverse, forward]).type()).toBe(expectedType);
+    });
+
+    test("reversal preserves presence and is involutive", () => {
+        const data: DeltaData = {
+            created: ["created", {}, { ...entityData, id: "created" }],
+            deleted: ["deleted", { ...entityData, id: "deleted" }, {}],
+            updated: ["updated", { removed: null, name: "old" }, { added: null, name: "new" }],
+        };
+        const delta = new Delta(data);
+        expect(delta.reversed().data).toEqual({
+            created: ["created", { ...entityData, id: "created" }, {}],
+            deleted: ["deleted", {}, { ...entityData, id: "deleted" }],
+            updated: ["updated", { added: null, name: "new" }, { removed: null, name: "old" }],
+        });
+        expect(delta.reversed().reversed().data).toEqual(data);
+    });
+});
 
 describe("Delta.fromEntities", () => {
     test("creates copied snapshots from entity iterables", () => {
@@ -41,156 +76,184 @@ describe("Delta.fromEntities", () => {
 });
 
 describe("Delta mergeChangeWithPriority", () => {
-    // [description, firstDelta, nextDelta, expectedType|null, expectedReverse, expectedForward]
-    const mergeCases: [string, any, any, ChangeType | null, any, any][] = [
+    const mergeCases: [string, DeltaData, DeltaData, DeltaData][] = [
         [
-            "UPDATE > UPDATE (same field cancels)",
+            "same field cancels",
             { e: ["e", { x: 1 }, { x: 2 }] },
             { e: ["e", { x: 2 }, { x: 1 }] },
-            null, null, null,
+            {},
         ],
         [
-            "UPDATE > UPDATE (different fields accumulate)",
+            "different fields accumulate",
             { e: ["e", { x: 1 }, { x: 2 }] },
             { e: ["e", { y: 3 }, { y: 4 }] },
-            ChangeType.UPDATE,
-            { y: 3, x: 1 },
-            { y: 4, x: 2 },
+            { e: ["e", { x: 1, y: 3 }, { x: 2, y: 4 }] },
         ],
         [
-            "UPDATE > UPDATE (same field, second wins forward)",
+            "same field keeps earliest reverse and latest forward",
             { e: ["e", { x: 1 }, { x: 2 }] },
             { e: ["e", { x: 2 }, { x: 3 }] },
-            ChangeType.UPDATE,
-            { x: 1 },
-            { x: 3 },
+            { e: ["e", { x: 1 }, { x: 3 }] },
         ],
         [
-            "CREATE > UPDATE (extends create forward)",
-            { e: ["e", {}, { x: 1 }] },
+            "CREATE > UPDATE changes and removes fields",
+            { e: ["e", {}, { ...entityData, home: "page-a", name: "first" }] },
+            { e: ["e", { home: "page-a", name: "first" }, { name: "second" }] },
+            { e: ["e", {}, { ...entityData, name: "second" }] },
+        ],
+        [
+            "CREATE > DELETE cancels",
+            { e: ["e", {}, { ...entityData }] },
+            { e: ["e", { ...entityData }, {}] },
+            {},
+        ],
+        [
+            "DELETE > CREATE keeps only differing fields",
+            { e: ["e", { ...entityData, x: 1, y: 2 }, {}] },
+            { e: ["e", {}, { ...entityData, x: 3, y: 2 }] },
+            { e: ["e", { x: 1 }, { x: 3 }] },
+        ],
+        [
+            "DELETE > CREATE identical data cancels",
+            { e: ["e", { ...entityData }, {}] },
+            { e: ["e", {}, { ...entityData }] },
+            {},
+        ],
+        [
+            "UPDATE > DELETE restores original values and excludes added fields",
+            { e: ["e", { name: "first" }, { name: "second", home: "page-a" }] },
+            { e: ["e", { ...entityData, name: "second", home: "page-a", x: 10 }, {}] },
+            { e: ["e", { ...entityData, name: "first", x: 10 }, {}] },
+        ],
+        [
+            "changed field then removed",
+            { e: ["e", { home: "page-a", name: "first" }, { home: "page-b", name: "second" }] },
+            { e: ["e", { home: "page-b", name: "second" }, { name: "third" }] },
+            { e: ["e", { home: "page-a", name: "first" }, { name: "third" }] },
+        ],
+        [
+            "add > remove cancels absent endpoints",
+            { e: ["e", {}, { home: "page-a" }] },
+            { e: ["e", { home: "page-a" }, {}] },
+            {},
+        ],
+        [
+            "remove > re-add same value cancels",
+            { e: ["e", { home: "page-a" }, {}] },
+            { e: ["e", {}, { home: "page-a" }] },
+            {},
+        ],
+        [
+            "remove > re-add different value",
+            { e: ["e", { home: "page-a" }, {}] },
+            { e: ["e", {}, { home: "page-b" }] },
+            { e: ["e", { home: "page-a" }, { home: "page-b" }] },
+        ],
+        [
+            "add null > replace preserves initial absence",
+            { e: ["e", {}, { home: null }] },
+            { e: ["e", { home: null }, { home: "page-a" }] },
+            { e: ["e", {}, { home: "page-a" }] },
+        ],
+        [
+            "null > absent > value preserves original null",
+            { e: ["e", { home: null }, {}] },
+            { e: ["e", {}, { home: "page-a" }] },
+            { e: ["e", { home: null }, { home: "page-a" }] },
+        ],
+        [
+            "EMPTY > UPDATE is identity",
+            { e: ["e", {}, {}] },
             { e: ["e", { x: 1 }, { x: 2 }] },
-            ChangeType.CREATE,
-            {},
-            { x: 2 },
+            { e: ["e", { x: 1 }, { x: 2 }] },
         ],
         [
-            "CREATE > DELETE (net nothing)",
-            { e: ["e", {}, { x: 1, y: 2 }] },
-            { e: ["e", { x: 1, y: 2 }, {}] },
-            null, null, null,
-        ],
-        [
-            "DELETE > CREATE (becomes update, unchanged fields stripped)",
-            { e: ["e", { x: 1, y: 2 }, {}] },
-            { e: ["e", {}, { x: 3, y: 2 }] },
-            ChangeType.UPDATE,
-            { x: 1 },
-            { x: 3 },
-        ],
-        [
-            "DELETE > CREATE same data (cancels to nothing)",
-            { e: ["e", { x: 1 }, {}] },
-            { e: ["e", {}, { x: 1 }] },
-            null, null, null,
-        ],
-        [
-            "UPDATE > DELETE (net = delete with original state)",
-            { e: ["e", { color: "red" }, { color: "blue" }] },
-            { e: ["e", { color: "blue", x: 10 }, {}] },
-            ChangeType.DELETE,
-            { color: "red", x: 10 },
-            {},
+            "UPDATE > EMPTY is identity",
+            { e: ["e", { x: 1 }, { x: 2 }] },
+            { e: ["e", {}, {}] },
+            { e: ["e", { x: 1 }, { x: 2 }] },
         ],
     ];
 
-    test.each(mergeCases)("%s", (_, first, next, expectedType, expectedReverse, expectedForward) => {
+    test.each(mergeCases)("%s", (_, first, next, expected) => {
         const delta = new Delta(first);
         delta.mergeWithPriority(new Delta(next));
-        const change = delta.change("e");
-        if (expectedType === null) {
-            expect(change).toBeUndefined();
-        } else {
-            expect(change).toBeDefined();
-            expect(change!.type()).toBe(expectedType);
-            expect(change!.reverseComponent).toEqual(expectedReverse);
-            expect(change!.forwardComponent).toEqual(expectedForward);
-        }
+        expect(delta.data).toEqual(expected);
+    });
+
+    test("invalid lifecycle composition raises", () => {
+        const create: DeltaData = { e: ["e", {}, { ...entityData }] };
+        expect(() => new Delta(create).mergeWithPriority(new Delta(create))).toThrow();
     });
 });
 
 describe("squashDeltas", () => {
-    // [description, array of deltas, entityId, expectedType|null, expectedReverse, expectedForward]
-    const squashCases: [string, any[], string, ChangeType | null, any, any][] = [
+    const squashCases: [string, DeltaData[], DeltaData][] = [
         [
-            "CREATE > UPDATE > DELETE = nothing",
+            "CREATE > UPDATE > DELETE cancels",
             [
-                { e: ["e", {}, { x: 1 }] },
+                { e: ["e", {}, { ...entityData, x: 1 }] },
                 { e: ["e", { x: 1 }, { x: 2 }] },
-                { e: ["e", { x: 2 }, {}] },
+                { e: ["e", { ...entityData, x: 2 }, {}] },
             ],
-            "e", null, null, null,
+            {},
         ],
         [
-            "multiple UPDATEs accumulate",
+            "multiple updates accumulate",
             [
                 { e: ["e", { x: 1 }, { x: 2 }] },
                 { e: ["e", { x: 2 }, { x: 3 }] },
                 { e: ["e", { y: 0 }, { y: 5 }] },
             ],
-            "e", ChangeType.UPDATE, { x: 1, y: 0 }, { x: 3, y: 5 },
+            { e: ["e", { x: 1, y: 0 }, { x: 3, y: 5 }] },
         ],
         [
-            "UPDATE > DELETE (pre-existing entity)",
+            "DELETE > CREATE > UPDATE",
             [
-                { e: ["e", { x: 5 }, { x: 10 }] },
-                { e: ["e", { x: 10, name: "foo" }, {}] },
-            ],
-            "e", ChangeType.DELETE, { x: 5, name: "foo" }, {},
-        ],
-        [
-            "DELETE > CREATE > UPDATE (re-creation cycle)",
-            [
-                { e: ["e", { x: 1, y: 2 }, {}] },
-                { e: ["e", {}, { x: 10, y: 20 }] },
+                { e: ["e", { ...entityData, x: 1, y: 2 }, {}] },
+                { e: ["e", {}, { ...entityData, x: 10, y: 20 }] },
                 { e: ["e", { x: 10 }, { x: 30 }] },
             ],
-            "e", ChangeType.UPDATE, { x: 1, y: 2 }, { x: 30, y: 20 },
+            { e: ["e", { x: 1, y: 2 }, { x: 30, y: 20 }] },
         ],
         [
-            "independent entities don't interfere (entity a)",
+            "independent entities do not interfere",
             [
-                { a: ["a", {}, { v: 1 }], b: ["b", { v: 0 }, { v: 1 }] },
+                { a: ["a", {}, { ...entityData, id: "a", v: 1 }], b: ["b", { v: 0 }, { v: 1 }] },
                 { a: ["a", { v: 1 }, { v: 2 }] },
-                { b: ["b", { v: 1 }, {}] },
+                { b: ["b", { ...entityData, id: "b", v: 1 }, {}] },
             ],
-            "a", ChangeType.CREATE, {}, { v: 2 },
+            {
+                a: ["a", {}, { ...entityData, id: "a", v: 2 }],
+                b: ["b", { ...entityData, id: "b", v: 0 }, {}],
+            },
         ],
         [
-            "independent entities don't interfere (entity b)",
+            "add > remove > re-add null",
             [
-                { a: ["a", {}, { v: 1 }], b: ["b", { v: 0 }, { v: 1 }] },
-                { a: ["a", { v: 1 }, { v: 2 }] },
-                { b: ["b", { v: 1 }, {}] },
+                { e: ["e", {}, { home: "page-a" }] },
+                { e: ["e", { home: "page-a" }, {}] },
+                { e: ["e", {}, { home: null }] },
             ],
-            "b", ChangeType.DELETE, { v: 0 }, {},
+            { e: ["e", {}, { home: null }] },
+        ],
+        [
+            "replace > remove > re-add preserves original endpoint",
+            [
+                { e: ["e", { home: "page-a", x: 0 }, { home: "page-b", x: 1 }] },
+                { e: ["e", { home: "page-b", x: 1 }, { x: 2 }] },
+                { e: ["e", { x: 2 }, { home: "page-c", x: 3 }] },
+            ],
+            { e: ["e", { home: "page-a", x: 0 }, { home: "page-c", x: 3 }] },
         ],
     ];
 
-    test.each(squashCases)("%s", (_, deltas, entityId, expectedType, expectedReverse, expectedForward) => {
-        const squashed = squashDeltas(deltas);
-        const change = squashed.change(entityId);
-        if (expectedType === null) {
-            expect(change).toBeUndefined();
-        } else {
-            expect(change).toBeDefined();
-            expect(change!.type()).toBe(expectedType);
-            expect(change!.reverseComponent).toEqual(expectedReverse);
-            expect(change!.forwardComponent).toEqual(expectedForward);
-        }
+    test.each(squashCases)("%s", (_, deltas, expected) => {
+        expect(squashDeltas(deltas).data).toEqual(expected);
     });
 
     test("squashDeltas does not mutate input delta data", () => {
-        const delta0: DeltaData = { e: ["e", {}, { x: 1, y: 2 }] };
+        const delta0: DeltaData = { e: ["e", {}, { ...entityData, x: 1, y: 2 }] };
         const delta1: DeltaData = { e: ["e", { x: 1 }, { x: 3 }] };
         const delta0Copy = JSON.parse(JSON.stringify(delta0));
         const delta1Copy = JSON.parse(JSON.stringify(delta1));

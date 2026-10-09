@@ -11,8 +11,8 @@ export enum ChangeType {
 
 export type ChangeData = [
     string, // entity id
-    Record<string, any>, // reverse change component
-    Record<string, any> // forward change component (apply to get new state)
+    Record<string, any>, // affected fields before the change
+    Record<string, any> // affected fields after the change
 ];
 
 export class Change {
@@ -44,18 +44,20 @@ export class Change {
         this._data[2] = value
     }
 
+    /** Classify the component shape without validating the entity data. */
     type() {
         const hasReverse = Object.keys(this.reverseComponent).length > 0
         const hasForward = Object.keys(this.forwardComponent).length > 0
-        if (hasReverse && hasForward) {
-            return ChangeType.UPDATE
-        } else if (hasReverse) {
-            return ChangeType.DELETE
-        } else if (hasForward) {
-            return ChangeType.CREATE
-        } else {
+        if (!hasReverse && !hasForward) {
             return ChangeType.EMPTY
         }
+        if (!hasForward && Object.prototype.hasOwnProperty.call(this.reverseComponent, "id")) {
+            return ChangeType.DELETE
+        }
+        if (!hasReverse && Object.prototype.hasOwnProperty.call(this.forwardComponent, "id")) {
+            return ChangeType.CREATE
+        }
+        return ChangeType.UPDATE
     }
 
     static create(entity: Entity<EntityData>): Change {

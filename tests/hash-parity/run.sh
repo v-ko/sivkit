@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the hash parity test: Python vs TypeScript.
-# Generates a fuzz fixture, runs both sides, compares root hashes.
-# Exit 0 if they match, 1 if they differ.
+# Generates a fuzz fixture or uses an existing one, and runs both languages.
+# Exit 0 if all fixture checks pass and checkpoint/root hashes match, 1 otherwise.
 #
 # Usage:
 #   bash run.sh                     # Generate fuzz (seed=42) and test
@@ -36,26 +36,34 @@ echo
 
 # Python side
 echo "--- Python ---"
-PY_OUTPUT=$($PYTHON "$HERE/test-parity-py.py" "$FIXTURE")
+PY_STATUS=0
+PY_OUTPUT=$($PYTHON "$HERE/test-parity-py.py" "$FIXTURE") || PY_STATUS=$?
 echo "$PY_OUTPUT"
-PY_HASH=$(echo "$PY_OUTPUT" | grep "^Root hash:" | tail -1 | cut -d' ' -f3)
 echo
 
 # TypeScript side
 echo "--- TypeScript ---"
-TS_OUTPUT=$(cd "$HERE/../.." && npx --yes tsx "$HERE/test-parity-ts.ts" "$FIXTURE")
+TS_STATUS=0
+TS_OUTPUT=$(cd "$HERE/../.." && npx --yes tsx "$HERE/test-parity-ts.ts" "$FIXTURE") || TS_STATUS=$?
 echo "$TS_OUTPUT"
-TS_HASH=$(echo "$TS_OUTPUT" | grep "^Root hash:" | tail -1 | cut -d' ' -f3)
 echo
 
 # Compare
 echo "=== Result ==="
-if [ "$PY_HASH" = "$TS_HASH" ]; then
-    echo "PASS: PY and TS root hashes match: $PY_HASH"
+if [ "$PY_STATUS" -ne 0 ] || [ "$TS_STATUS" -ne 0 ]; then
+    echo "FAIL: fixture checks failed (Python=$PY_STATUS, TypeScript=$TS_STATUS)"
+    exit 1
+fi
+PY_HASHES=$(echo "$PY_OUTPUT" | grep -E '^(Checkpoint hash:|Root hash:)')
+TS_HASHES=$(echo "$TS_OUTPUT" | grep -E '^(Checkpoint hash:|Root hash:)')
+if [ "$PY_HASHES" = "$TS_HASHES" ]; then
+    echo "PASS: PY and TS checkpoint and root hashes match"
     exit 0
 else
-    echo "FAIL: root hashes differ!"
-    echo "  Python: $PY_HASH"
-    echo "  TS:     $TS_HASH"
+    echo "FAIL: checkpoint or root hashes differ!"
+    echo "Python:"
+    echo "$PY_HASHES"
+    echo "TypeScript:"
+    echo "$TS_HASHES"
     exit 1
 fi

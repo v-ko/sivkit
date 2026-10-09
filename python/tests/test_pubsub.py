@@ -1,22 +1,33 @@
+import pytest
+
 import sivkit
 from sivkit.libs.channel import Channel
 from sivkit.libs.model import Entity, entity_type
 from sivkit.loop import NoMainLoop
 
 
-def test_pubsub():
+@entity_type
+class MockNote(Entity):
+    text: str = ""
+
+
+@pytest.fixture
+def main_loop():
+    previous = sivkit.main_loop()
     main_loop = NoMainLoop()
     sivkit.set_main_loop(main_loop)
+    try:
+        yield main_loop
+    finally:
+        sivkit.set_main_loop(previous)
 
+
+def test_pubsub(main_loop):
     channel = Channel(
         "test_channel",
         subchannel=lambda x: x.id,
         subchannel_classifier=lambda x: x.text != "NO",
     )
-
-    @entity_type
-    class MockNote(Entity):
-        text: str = ""
 
     expected_notes = []
     all_notes = []

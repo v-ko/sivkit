@@ -1,6 +1,5 @@
 import { InMemoryStore } from "../domain-store/InMemoryStore";
 import { Change } from "../../model/Change";
-import { Commit } from "../version-control/Commit";
 import { buildHashTree } from "../version-control/HashTree";
 import { Delta } from "../../model/Delta";
 import { Repository, VcsAdapterConfig } from "sivkit/storage/repository/Repository";
@@ -23,45 +22,23 @@ describe("Repository base functionality", () => {
         repo = await Repository.create(config, true);
     });
 
-    test("Commit", async () => {
-        // The repo is created in beforeEach
-        let initialHash = repo.hashTree.rootHash()
-        // console.log('Initial hash:', initialHash)
+    afterEach(() => repo.close());
 
-        let sourceStore = new InMemoryStore()
+    test("Commit and inverse restore entity data and hash", async () => {
+        const initialHash = repo.hashTree.rootHash();
+        const page = new DummyPage({ id: 'page1', parent_id: '', name: 'Page 1' });
+        const note = new DummyNote({ id: 'entity1', testProp: 'entity1', parent_id: page.id });
+        const delta = Delta.fromChanges([Change.create(page), Change.create(note)]);
+        const commit = await repo.commit(delta, 'Initial commit');
 
-        let changes: Change[] = [
-            sourceStore.insertOne(new DummyPage({ id: 'page1', parent_id: '', name: 'Page 1' })),
-            sourceStore.insertOne(new DummyNote({ id: 'entity1', testProp: 'entity1', parent_id: 'page1' })),
-        ]
-                let delta = Delta.fromChanges(changes)
-        let commit: Commit
-        try{
-            commit = await repo.commit(delta, 'Initial commit')
-        } catch (e) {
-            throw Error ('Error committing' + e)
-        }
+        expect([...repo.headStore.find()]).toEqual([page, note]);
+        expect(commit.snapshotHash).toEqual(repo.hashTree.rootHash());
+        expect(commit.snapshotHash).not.toEqual(initialHash);
 
-
-        let hashAfterCommit = repo.hashTree.rootHash()
-        console.log('Hash after commit:', hashAfterCommit)
-
-        expect(commit.snapshotHash).toEqual(hashAfterCommit)
-        expect(hashAfterCommit).not.toEqual(initialHash)
-
-        // Reverse
-        let reverseDelta = delta.reversed()
-        let reverseCommit: Commit
-        try {
-            reverseCommit = await repo.commit(reverseDelta, 'Reverse commit')
-        } catch (e) {
-            console.log(e)
-            throw e
-        }
-        let hashAfterReverseCommit = repo.hashTree.rootHash()
-
-        expect(reverseCommit.snapshotHash).toEqual(hashAfterReverseCommit)
-        expect(hashAfterReverseCommit).toEqual(initialHash)
+        const reverseCommit = await repo.commit(delta.reversed(), 'Reverse commit');
+        expect([...repo.headStore.find()]).toEqual([]);
+        expect(reverseCommit.snapshotHash).toEqual(repo.hashTree.rootHash());
+        expect(reverseCommit.snapshotHash).toEqual(initialHash);
     });
 
     test("Pull same branch", async () => {
@@ -72,41 +49,32 @@ describe("Repository base functionality", () => {
                 projectId: createId()
             }
         };
-        let repo2 = await Repository.create(config2, true);
+        const repo2 = await Repository.create(config2, true);
+        try {
+            const sourceStore = new InMemoryStore();
+            const changes = [
+                sourceStore.insertOne(new DummyPage({ id: 'page1', parent_id: '', name: 'Page 1' })),
+                sourceStore.insertOne(new DummyNote({ id: 'entity1', testProp: 'entity1', parent_id: 'page1' })),
+            ];
+            await repo.commit(Delta.fromChanges(changes), 'Initial commit');
 
-        // Add some data to repo1
-        let sourceStore = new InMemoryStore()
+            await repo2.pull(repo);
+            expect(repo2.hashTree.rootHash()).toEqual(repo.hashTree.rootHash());
+            expect(repo2.headStore.data()).toEqual(sourceStore.data());
 
-        let changes: Change[] = [
-            sourceStore.insertOne(new DummyPage({ id: 'page1' , parent_id:'', name: 'Page 1' })),
-            sourceStore.insertOne(new DummyNote({ id: 'entity1', testProp: 'entity1', parent_id: 'page1' })),
-        ]
+            // Generate the change outside the async repo's read-only head store.
+            const change = sourceStore.insertOne(
+                new DummyNote({ id: 'entity2', testProp: 'entity2', parent_id: 'page1' }),
+            );
+            await repo2.commit(Delta.fromChanges([change]), 'Second commit');
 
-        let delta = Delta.fromChanges(changes)
-        await repo.commit(delta, 'Initial commit')
-
-        // Pull from repo1 to repo2
-        await repo2.pull(repo)
-
-        let hash1 = repo.hashTree.rootHash()
-        let hash2 = repo2.hashTree.rootHash()
-        expect(hash1).toEqual(hash2)
-
-        // Make a change in repo2 (generate the change outside of it, since
-        // the async repo does not have a way to directly alter entities in the
-        // head store)
-        let changes2: Change[] = [
-            sourceStore.insertOne(new DummyNote({ id: 'entity2', testProp: 'entity2', parent_id: 'page1' })),
-        ]
-        let delta2 = Delta.fromChanges(changes2)
-        await repo2.commit(delta2, 'Second commit')
-
-        // Pull from repo2 to repo1
-        await repo.pull(repo2)
-
-        let hashAfterChange = repo2.hashTree.rootHash()
-        let hashAfterPull = repo.hashTree.rootHash()
-        expect(hashAfterChange).toEqual(hashAfterPull)
+            await repo.pull(repo2);
+            expect(repo.hashTree.rootHash()).toEqual(repo2.hashTree.rootHash());
+            expect(repo.headStore.data()).toEqual(sourceStore.data());
+            expect(repo2.headStore.data()).toEqual(sourceStore.data());
+        } finally {
+            repo2.close();
+        }
     });
 
     test("Remove page with note and do integrity check", async () => {
@@ -137,23 +105,15 @@ describe("Repository base functionality", () => {
 
         let delta2 = Delta.fromChanges(changes2)
 
-        // Log the state before commit
-        console.log('Store state before removal:', Array.from(repo.headStore.find({})))
-        console.log('Hash tree before removal:', repo.hashTree)
-
         let commit = await repo.commit(delta2, 'Remove page1 and entity1')
-
-        // Log the state after commit
-        console.log('Store state after removal:', Array.from(repo.headStore.find({})))
-        console.log('Hash tree after removal:', repo.hashTree)
-        console.log('Commit snapshot hash:', commit.snapshotHash)
+        expect([...repo.headStore.find()]).toEqual([
+            new DummyPage({ id: 'page2', parent_id: '', name: 'Page 2' }),
+            new DummyNote({ id: 'entity2', parent_id: 'page2', testProp: 'entity2' }),
+        ]);
 
         // Recreate the hash tree and check that it's the same as the original
         let hashTree = await buildHashTree(repo.headStore)
         let rootHash = hashTree.rootHash()
-        console.log('Rebuilt hash tree root hash:', rootHash)
-        console.log('Rebuilt hash tree:', hashTree)
-        console.log('Head store', repo.headStore.data())
 
         expect(rootHash).toEqual(commit.snapshotHash)
     });
@@ -184,6 +144,4 @@ describe("Repository base functionality", () => {
         expect((repo.headStore.findOne({ id: 'page1' }) as DummyPage | undefined)?.name).toBe('Local Page');
     });
 
-    // Add sync with conflict
-    // Automerge
 });

@@ -1,5 +1,8 @@
 import { ProjectStorageManager, ProjectStorageConfig } from "./ProjectStorageManager";
 import { clearInMemoryAdapterInstances, VcsAdapterConfig } from "../repository/Repository";
+import { Change } from "../../model/Change";
+import { Delta } from "../../model/Delta";
+import { DummyPage } from "../test-utils";
 
 
 const INMEM_PROJECT_STORAGE_CONFIG: VcsAdapterConfig = {
@@ -31,30 +34,47 @@ describe("ProjectStorageManager base functionality", () => {
         projectStorageManager = new ProjectStorageManager(projectStorageConfig);
     });
     afterEach(async () => {
-        clearInMemoryAdapterInstances();
+        try {
+            await projectStorageManager.shutdown();
+        } finally {
+            clearInMemoryAdapterInstances();
+        }
     });
 
-    test("Create and load project", async () => {
-        // Create project
+    test("Create and reload project preserves committed entities and history", async () => {
         await projectStorageManager.createProject();
-        expect(projectStorageManager.onDeviceRepo).toBeDefined();
         expect(projectStorageManager.fileStore).toBeDefined();
-        expect(projectStorageManager.onDeviceRepo.hashTree).toBeDefined();
-        const commitGraph = await projectStorageManager.onDeviceRepo.getCommitGraph();
-        expect(commitGraph).toBeDefined();
-        expect(commitGraph.branches()).toHaveLength(1);
+        const page = new DummyPage({ id: 'p1', parent_id: '', name: 'Saved page' });
+        const commit = await projectStorageManager.onDeviceRepo.commit(
+            Delta.fromChanges([Change.create(page)]), 'add page',
+        );
 
-        // Shutdown and reload
         await projectStorageManager.shutdown();
+        projectStorageManager = new ProjectStorageManager(projectStorageConfig);
+        await projectStorageManager.loadProject();
+        expect(projectStorageManager.onDeviceRepo.headStore.findOne({ id: 'p1' })).toEqual(page);
+        expect(projectStorageManager.onDeviceRepo.hashTree.rootHash()).toBe(commit.snapshotHash);
+        const graph = await projectStorageManager.onDeviceRepo.getCommitGraph();
+        expect(graph.branchCommits('dev1').map(c => c.id)).toEqual([commit.id]);
     });
 
     test("Erase local storage", async () => {
         await projectStorageManager.createProject();
+        const page = new DummyPage({ id: 'p1', parent_id: '', name: 'Saved page' });
+        await projectStorageManager.onDeviceRepo.commit(
+            Delta.fromChanges([Change.create(page)]), 'add page',
+        );
+        const path = '/saved.txt';
+        await projectStorageManager.fileStore.addFile(new Blob(['saved']), path);
 
-        // Should not throw
         await projectStorageManager.eraseLocalStorage();
+        await expect(projectStorageManager.fileStore.getFile(path)).rejects.toThrow('File not found');
 
         await projectStorageManager.shutdown();
+        projectStorageManager = new ProjectStorageManager(projectStorageConfig);
+        await expect(projectStorageManager.loadProject()).rejects.toThrow(/Branch.*not found/);
+        await projectStorageManager.createProject();
+        expect([...projectStorageManager.onDeviceRepo.headStore.find()]).toEqual([]);
     });
 
     test("Erase local storage before initialization", async () => {
