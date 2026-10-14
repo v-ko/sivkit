@@ -1,5 +1,5 @@
 import * as Comlink from 'comlink';
-import { ProjectStorageConfig, StorageAddon, ProjectStorageManager } from './ProjectStorageManager';
+import { ProjectStorageConfig } from './ProjectStorageManager';
 import { DeltaData } from '../../model/Delta';
 import { RepoUpdateData } from '../repository/Repository';
 import { AddFileResult } from '../file-store/FileStoreAdapter';
@@ -14,6 +14,7 @@ import {
     getStorageUpdatesChannel,
     LOCAL_STORAGE_UPDATE_CHANNEL,
     CommitOperationResult,
+    StorageAddonDescriptor,
 } from './StorageService';
 
 let log = getLogger('StorageServiceProxy');
@@ -162,7 +163,7 @@ export class StorageServiceProxy {
     // ----- Setup -----
 
     setupInMainThread(
-        addons?: { name: string; create: (psm: ProjectStorageManager) => StorageAddon }[],
+        addons?: StorageAddonDescriptor[],
     ) {
         log.info('Setting up storage service in main thread');
         this._service = new StorageService(addons);

@@ -111,6 +111,7 @@ export class IndexedDBVcsAdapter implements VcsAdapter {
         if (this._db) {
             log.info('Closing IndexedDB connection');
             this._db.close();
+            this._db = null;
         } else {
             log.warning('[close] IndexedDB already closed');
         }
@@ -291,6 +292,7 @@ export class IndexedDBVcsAdapter implements VcsAdapter {
             });
         } catch (e) {
             log.error('Error erasing IndexedDB storage for project', this._projectId, e);
+            throw e;
         }
         log.info('Erased IndexedDB storage for project', this._projectId);
     }

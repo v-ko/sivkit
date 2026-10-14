@@ -427,6 +427,8 @@ It is modeled on git (commits, branches, a head), but commits are not content-ad
 - **VCS adapters** — where commits are persisted: IndexedDB or a REST backend in the browser, SQLite in Python, in-memory for tests.
 - **`StorageService` / `ProjectStorageManager`** (TS) — the repository lives in a shared worker, one per browser, which serializes commits from all tabs and broadcasts the updates. The UI commits optimistically through a service and reconciles when the update comes back, so the user never waits for a save.
 
+For adapter choices, worker setup and addon lifecycle, see [TypeScript storage setup](docs/storage-setup.md).
+
 #### Sync services
 Sync services keep two stores in step by exchanging deltas. Remote changes are applied in an `issuer='service'` action whenever the store requires actions.
 
@@ -439,25 +441,21 @@ Direct device-to-device sync over WebRTC, with each device as a branch in the re
 
 
 ### Main, Facade and progressive complexity of the app architecture
-The main() entry point can be a whole app if we're building something simple.
-Later we add modules when the code size baloons. Typically we're building services with a programatic interface (exposed OS-local or to the web) and/or OS-interactions (other local services or file-system) and/or UI-interactions.
+The main() entry point can be a whole app if we're building something simple. Later we add modules when the code size baloons. Typically we're building services with a programatic interface (exposed OS-local or to the web) and/or OS-interactions (other local services or file-system) and/or UI-interactions.
 
 The main() can hold everything, but for readability and for the sake of defering the import of heavy dependencies we split the code into modules (the source-tree).
 
-Our program will probably need different configurations if ran on different devices or conditions. E.g. preferences passed by OS environment variables, per-run command line arguments, or auto-detected hardware and software conditions (gpu present, system color theme, etc.). The main() can still be the place to add this logic, but that can also baloon in size.
-Something else that can baloon in size is the count of our objects dealing with all kinds of stuff - integration services, storage, UI-related classes. And ALL OF THEM want to talk to eachother. But if we start just wiring them together - that allows bugs of unimaginable complexity, along with making the code components untestable in isolation.
+Our program will probably need different configurations if ran on different devices or conditions. E.g. preferences passed by OS environment variables, per-run command line arguments, or auto-detected hardware and software conditions (gpu present, system color theme, etc.). The main() can still be the place to add this logic, but that can also baloon in size. Something else that can baloon in size is the count of our objects dealing with all kinds of stuff - integration services, storage, UI-related classes. And ALL OF THEM want to talk to eachother. But if we start just wiring them together - that allows bugs of unimaginable complexity, along with making the code components untestable in isolation.
 
 So we setup some conventions to deal with that.
-- UI interactions are processed in layers as explained above (Views/ViewStates/
-Actions/object Stores).
+- UI interactions are processed in layers as explained above (Views/ViewStates/Actions/object Stores).
 - Interactions with storage and networking (game progress save, document output, web collaboration) usually benifit Adapter classes, synchronization service classes, in-memory object Stores, etc. Persisting and sharing data can be *hard*.
 - CPU heavy work or non-trivial data transformation logic needs its own patterns. Computing the next frame of the game or processing an inflow of user requests for your social network app can be an infinitely complex task, which should be split into a plethora of class types with specific responcibilities and lifecycle. I.e. there's no universal answer but good examples are:
   - Adapter - implements a stable interface to some other service (over network, other transport) or a storage medium (db, file-system). Does not have state.
   - Service - class instances that encapsulate some functionality and have state.
   - Manager - a service which composes several adapters or other services and coordinates their operation.
 
-Access to all of those components, as mentioned above, should be controlled. E.g. a user presses ctrl+z and a view wants to call the undo service and restore the last revision to the document store. Or the rendering preparation service needs to call the physics engine to get some parameters of the new car-wreck that the user is about to cause in the game.
-Some of this spaghetti is solved by doing heirarhy and scoping. The OOP principles apply here. But in reality even in a good hierarchy - the janitor may can say hi to the president. If the latter is not occupied.
+Access to all of those components, as mentioned above, should be controlled. E.g. a user presses ctrl+z and a view wants to call the undo service and restore the last revision to the document store. Or the rendering preparation service needs to call the physics engine to get some parameters of the new car-wreck that the user is about to cause in the game. Some of this spaghetti is solved by doing heirarhy and scoping. The OOP principles apply here. But in reality even in a good hierarchy - the janitor may can say hi to the president. If the latter is not occupied.
 
 **The facade is the place where we define which cross-hierarchy calls are allowed and when.** It's the place where we explicitly track coupling between components that live in different scopes or levels.
 
@@ -466,9 +464,7 @@ Some of this spaghetti is solved by doing heirarhy and scoping. The OOP principl
 - Wiring is e.g. the subscriptions of a service, connections to collaborators. Mostly setting up callbacks and messaging channels.
 - Lifecycle is the enabling/disenabling (start/stop) of a service without scrapping it in the mean time.
 
-Wiring can be done by the service itself on construction. Or if there are sibling services - it should be done by the parent. That's either the facade or if that gets overcrowded - we can group facade logic and members into domain attributes like facade.{storage,theme,router}. The domain could be useful way late when there's really a lot of functionality to organize.
-**If the facade is like a scope to composit services into - the domain is a sub-facade with a topic**.
-So wiring should happen in the service constructor if it only uses service dependencies and will not be altered. Else it should be done by some parent or grand-parent (closest possible to narrow scope access),
+Wiring can be done by the service itself on construction. Or if there are sibling services - it should be done by the parent. That's either the facade or if that gets overcrowded - we can group facade logic and members into domain attributes like facade.{storage,theme,router}. The domain could be useful way late when there's really a lot of functionality to organize. **If the facade is like a scope to composit services into - the domain is a sub-facade with a topic**. So wiring should happen in the service constructor if it only uses service dependencies and will not be altered. Else it should be done by some parent or grand-parent (closest possible to narrow scope access),
 
 In short:
 - Main deals with app configuration variability. Can hold everything really if the app is small enough.

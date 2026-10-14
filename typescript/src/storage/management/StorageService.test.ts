@@ -1,8 +1,9 @@
 import { Change } from "sivkit/model/Change";
 import { Delta } from "sivkit/model/Delta";
-import { ProjectStorageConfig } from "sivkit/storage/management/ProjectStorageManager";
+import { ProjectStorageConfig, ProjectStorageManager } from "sivkit/storage/management/ProjectStorageManager";
+import { StorageService, StorageAddonDescriptor } from './StorageService';
 import { StorageServiceProxy, StorageProxyState } from "sivkit/storage/management/StorageServiceProxy";
-import { clearInMemoryAdapterInstances, RepoUpdateData, VcsAdapterConfig } from "sivkit/storage/repository/Repository";
+import { clearInMemoryAdapterInstances, getVcsAdapter, Repository, RepoUpdateData, VcsAdapterConfig } from "sivkit/storage/repository/Repository";
 import { DummyNote, DummyPage } from "sivkit/storage/test-utils";
 import { createId } from "sivkit/util/base";
 import { clearChannels } from "sivkit/registries/Channel";
@@ -43,6 +44,12 @@ const INMEM_PROJECT_STORAGE_CONFIG: VcsAdapterConfig = {
     }
 }
 
+function signal() {
+    let resolve!: () => void;
+    const promise = new Promise<void>(r => { resolve = r; });
+    return { promise, resolve };
+}
+
 
 // Arm the callback before committing; await both delivery and the commit result.
 async function commitAndObserve(
@@ -75,6 +82,7 @@ describe("StorageService base functionality", () => {
     let projectId: string;
     let projectStorageConfig: ProjectStorageConfig;
     let proxies: StorageServiceProxy[];
+    let services: StorageService[];
 
     function createProxy() {
         const proxy = new StorageServiceProxy();
@@ -82,8 +90,15 @@ describe("StorageService base functionality", () => {
         return proxy;
     }
 
+    function createService(addons: StorageAddonDescriptor[]) {
+        const service = new StorageService(addons);
+        services.push(service);
+        return service;
+    }
+
     beforeEach(async () => {
         proxies = [];
+        services = [];
         storageService = createProxy();
         storageService.setupInMainThread();
         projectId = 'test-project-id';
@@ -101,6 +116,7 @@ describe("StorageService base functionality", () => {
 
     afterEach(async () => {
         for (const proxy of proxies) proxy.disconnect();
+        for (const service of services) service.disconnect();
         clearChannels();
         clearInMemoryAdapterInstances();
         jest.useRealTimers();
@@ -185,7 +201,7 @@ describe("StorageService base functionality", () => {
         // Try to create again, expect failure for duplicate id
         await expect(storageService.createProject(projectId, projectStorageConfig)).rejects.toThrow();
 
-        // Remove (works even when not loaded — temporarily loads internally)
+        // Removal erases without loading the project or constructing addons.
         await storageService.removeProject(projectId, projectStorageConfig);
 
         // Try to load deleted project
@@ -247,6 +263,224 @@ describe("StorageService base functionality", () => {
 
         await expect(addonService.sendToAddon(projectId, 'recorder', 'hi')).resolves.toEqual({ echo: 'hi' });
         await expect(addonService.sendToAddon(projectId, 'failing', 'hi')).rejects.toThrow();
+    });
+
+    test('Creation and shared loading validate admission and count references', async () => {
+        const creating = signal(), finishCreation = signal();
+        const loading = signal(), finishLoading = signal();
+        const original = ProjectStorageManager.prototype.createProject;
+        jest.spyOn(ProjectStorageManager.prototype, 'createProject').mockImplementationOnce(async function (this: ProjectStorageManager) {
+            creating.resolve();
+            await finishCreation.promise;
+            await original.call(this);
+        });
+        const unloading = jest.fn(async () => {});
+        const create = jest.fn(() => ({
+            onProjectLoaded: async () => { loading.resolve(); await finishLoading.promise; },
+            onProjectUnloading: unloading,
+        }));
+        const service = createService([{ name: 'addon', create }]);
+
+        // Loads wait for creation; a duplicate create is refused.
+        const creation = service.createProject(projectId, projectStorageConfig);
+        await creating.promise;
+        const first = service.loadProject(projectId, projectStorageConfig);
+        const second = service.loadProject(projectId, projectStorageConfig);
+        await expect(service.createProject(projectId, projectStorageConfig)).rejects.toThrow('being created');
+        expect(create).not.toHaveBeenCalled();
+        finishCreation.resolve();
+        await creation;
+
+        // Both callers share initialization, but conflicting config and early commits reject.
+        await loading.promise;
+        expect(create).toHaveBeenCalledTimes(1);
+        await expect(service.commit(projectId, {}, 'not ready')).rejects.toMatchObject({ name: 'ProjectStorageLifecycleError' });
+        await expect(service.loadProject(projectId, {
+            ...projectStorageConfig, onDeviceFileStore: { name: 'CacheAPI', args: { projectId } },
+        })).rejects.toMatchObject({ name: 'RepositoryConfigMismatchError' });
+        finishLoading.resolve();
+        await Promise.all([first, second]);
+
+        // The first release leaves the project usable; the last tears it down.
+        await service.unloadProject(projectId);
+        expect(unloading).not.toHaveBeenCalled();
+        await service.commit(projectId, Delta.fromChanges([
+            Change.create(new DummyPage({ id: 'still-open', parent_id: '', name: 'Still open' })),
+        ]).data, 'still open');
+        await service.unloadProject(projectId);
+        expect(unloading).toHaveBeenCalledTimes(1);
+    });
+
+    test('Failed creation and shared loading clean up and allow retry', async () => {
+        const started = signal(), ready = signal();
+        const loaded = jest.fn(async () => {}).mockImplementationOnce(async () => {
+            started.resolve();
+            await ready.promise;
+            throw new Error('initialization failed');
+        });
+        const unloading = jest.fn(async () => {});
+        const service = createService([{ name: 'addon', create: () => ({
+            onProjectLoaded: loaded, onProjectUnloading: unloading,
+        }) }]);
+        const adapter = await getVcsAdapter(projectStorageConfig.onDeviceVcsAdapter);
+        const close = jest.spyOn(adapter, 'close');
+
+        // A failed write releases both the connection and the creation reservation.
+        jest.spyOn(adapter, 'applyUpdate').mockRejectedValueOnce(new Error('write denied'));
+        await expect(service.createProject(projectId, projectStorageConfig)).rejects.toThrow('write denied');
+        expect(close).toHaveBeenCalledTimes(1);
+        await service.createProject(projectId, projectStorageConfig);
+        close.mockClear();
+
+        // A failed shared load rejects both callers and drains only once.
+        const failures = Promise.all([
+            expect(service.loadProject(projectId, projectStorageConfig)).rejects.toThrow('initialization failed'),
+            expect(service.loadProject(projectId, projectStorageConfig)).rejects.toThrow('initialization failed'),
+        ]);
+        await started.promise;
+        ready.resolve();
+        await failures;
+        expect(close).toHaveBeenCalledTimes(1);
+        expect(unloading).toHaveBeenCalledTimes(1);
+        await service.loadProject(projectId, projectStorageConfig);
+        await service.unloadProject(projectId);
+        expect(unloading).toHaveBeenCalledTimes(2);
+    });
+
+    test('Final unload settles commits, drains in reverse order and permits reload after a hook failure', async () => {
+        const writing = signal(), finishWrite = signal();
+        const draining = signal(), finishDrain = signal();
+        const order: string[] = [];
+        const loaded = jest.fn(async () => {});
+        let manager!: ProjectStorageManager;
+        const service = createService([
+            { name: 'dependency', create: psm => {
+                manager = psm;
+                return { onProjectLoaded: loaded, onProjectUnloading: async () => { order.push('dependency'); } };
+            } },
+            { name: 'dependent', create: () => ({
+                onProjectLoaded: async () => {},
+                onProjectUnloading: async () => {
+                    // Draining must be able to acquire the released commit lock.
+                    await navigator.locks.request(`storage-commit-${projectId}`, async () => {});
+                    order.push('dependent');
+                    draining.resolve();
+                    await finishDrain.promise;
+                    throw new Error('teardown failed');
+                },
+            }) },
+        ]);
+        const report = jest.spyOn(service, 'reportError');
+        await service.createProject(projectId, projectStorageConfig);
+        await service.loadProject(projectId, projectStorageConfig);
+        const write = jest.spyOn(manager, 'syncDeltaToDomainStore').mockImplementation(async () => {
+            writing.resolve(); await finishWrite.promise;
+        });
+
+        // Finish the accepted commit; refuse the one queued after final unload.
+        const committing = service.commit(projectId, Delta.fromChanges([
+            Change.create(new DummyPage({ id: 'in-flight', parent_id: '', name: 'In flight' })),
+        ]).data, 'in flight');
+        await writing.promise;
+        const unloading = service.unloadProject(projectId);
+        const rejected = expect(service.commit(projectId, {}, 'too late')).rejects.toMatchObject({ name: 'ProjectStorageLifecycleError' });
+        const reloading = service.loadProject(projectId, projectStorageConfig);
+        expect(order).toEqual([]);
+        finishWrite.resolve();
+        await Promise.all([committing, rejected, draining.promise]);
+        expect(write).toHaveBeenCalledTimes(1);
+        expect(loaded).toHaveBeenCalledTimes(1);
+
+        // Reload waits for the whole drain, including cleanup after a failed hook.
+        finishDrain.resolve();
+        await Promise.all([unloading, reloading]);
+        expect(order).toEqual(['dependent', 'dependency']);
+        expect(report).toHaveBeenCalledWith(expect.stringContaining('teardown failed'));
+        expect(loaded).toHaveBeenCalledTimes(2);
+        await service.unloadProject(projectId);
+    });
+
+    test('Removal drains references, reserves erasure, tolerates missing storage and waits for loading', async () => {
+        const order: string[] = [];
+        const erasing = signal(), finishErase = signal();
+        const loaded = jest.fn(async () => {});
+        const create = jest.fn(() => ({
+            onProjectLoaded: loaded,
+            onProjectUnloading: async () => { order.push('drain'); },
+        }));
+        const erase = jest.fn(async (config: ProjectStorageConfig) => {
+            expect(config).toEqual(projectStorageConfig);
+            order.push('erase'); erasing.resolve(); await finishErase.promise;
+        });
+        const service = createService([{ name: 'history', create, eraseLocalStorage: erase }]);
+        await service.createProject(projectId, projectStorageConfig);
+        await service.loadProject(projectId, projectStorageConfig);
+        await service.loadProject(projectId, projectStorageConfig);
+
+        // Removal ignores references and blocks new work until erasure finishes.
+        const removal = service.removeProject(projectId, projectStorageConfig);
+        await erasing.promise;
+        expect(order).toEqual(['drain', 'erase']);
+        await expect(service.loadProject(projectId, projectStorageConfig)).rejects.toMatchObject({ name: 'ProjectStorageLifecycleError' });
+        await expect(service.createProject(projectId, projectStorageConfig)).rejects.toMatchObject({ name: 'ProjectStorageLifecycleError' });
+        await expect(service.commit(projectId, {}, 'late')).rejects.toMatchObject({ name: 'ProjectStorageLifecycleError' });
+        finishErase.resolve();
+        await removal;
+        await service.unloadProject(projectId); // Late reference release is a no-op.
+        await expect(Repository.open(projectStorageConfig.onDeviceVcsAdapter, true)).rejects.toThrow(/Branch.*not found/);
+
+        // Unloaded/missing storage needs no addon instance; erase errors allow retry.
+        await service.removeProject(projectId, projectStorageConfig);
+        expect(create).toHaveBeenCalledTimes(1);
+        erase.mockRejectedValueOnce(new Error('erase denied'));
+        await expect(service.removeProject(projectId, projectStorageConfig)).rejects.toThrow('erase denied');
+        await service.removeProject(projectId, projectStorageConfig);
+
+        // A new load already in progress must settle before removal can drain it.
+        const loading = signal(), finishLoad = signal();
+        loaded.mockImplementationOnce(async () => {
+            loading.resolve(); await finishLoad.promise; order.push('loaded');
+        });
+        await service.createProject(projectId, projectStorageConfig);
+        order.length = 0;
+        const rejected = expect(service.loadProject(projectId, projectStorageConfig)).rejects.toMatchObject({ name: 'ProjectStorageLifecycleError' });
+        await loading.promise;
+        const removing = service.removeProject(projectId, projectStorageConfig);
+        expect(order).toEqual([]);
+        finishLoad.resolve();
+        await Promise.all([rejected, removing]);
+        expect(order).toEqual(['loaded', 'drain', 'erase']);
+        await expect(Repository.open(projectStorageConfig.onDeviceVcsAdapter, true)).rejects.toThrow(/Branch.*not found/);
+    });
+
+    test('Removal waits for successful or failed creation to clean up', async () => {
+        const original = ProjectStorageManager.prototype.createProject;
+        for (const fail of [false, true]) {
+            const entered = signal(), finish = signal();
+            let close!: jest.SpyInstance;
+            jest.spyOn(ProjectStorageManager.prototype, 'createProject').mockImplementationOnce(async function (this: ProjectStorageManager) {
+                await original.call(this);
+                close = jest.spyOn(this.onDeviceRepo, 'close');
+                entered.resolve();
+                await finish.promise;
+                if (fail) throw new Error('creation failed');
+            });
+            const erase = jest.fn(async () => { expect(close).toHaveBeenCalledTimes(1); });
+            const service = createService([{ name: 'addon', create: () => {
+                throw new Error('Removal must not construct addons');
+            }, eraseLocalStorage: erase }]);
+            const creation = service.createProject(projectId, projectStorageConfig);
+            const created = fail ? expect(creation).rejects.toThrow('creation failed') : creation;
+            await entered.promise;
+            const loading = expect(service.loadProject(projectId, projectStorageConfig)).rejects.toThrow();
+            const removal = service.removeProject(projectId, projectStorageConfig);
+            expect(erase).not.toHaveBeenCalled();
+            await expect(service.loadProject(projectId, projectStorageConfig)).rejects.toMatchObject({ name: 'ProjectStorageLifecycleError' });
+            finish.resolve();
+            await Promise.all([created, loading, removal]);
+            expect(erase).toHaveBeenCalledTimes(1);
+            await expect(Repository.open(projectStorageConfig.onDeviceVcsAdapter, true)).rejects.toThrow(/Branch.*not found/);
+        }
     });
 
     test('File operations', async () => {

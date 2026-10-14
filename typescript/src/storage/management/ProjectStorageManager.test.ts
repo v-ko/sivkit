@@ -1,5 +1,5 @@
 import { ProjectStorageManager, ProjectStorageConfig } from "./ProjectStorageManager";
-import { clearInMemoryAdapterInstances, VcsAdapterConfig } from "../repository/Repository";
+import { clearInMemoryAdapterInstances, getVcsAdapter, Repository, RepositoryIntegrityError, VcsAdapterConfig } from "../repository/Repository";
 import { Change } from "../../model/Change";
 import { Delta } from "../../model/Delta";
 import { DummyPage } from "../test-utils";
@@ -38,6 +38,7 @@ describe("ProjectStorageManager base functionality", () => {
             await projectStorageManager.shutdown();
         } finally {
             clearInMemoryAdapterInstances();
+            jest.restoreAllMocks();
         }
     });
 
@@ -72,7 +73,10 @@ describe("ProjectStorageManager base functionality", () => {
 
         await projectStorageManager.shutdown();
         projectStorageManager = new ProjectStorageManager(projectStorageConfig);
+        const adapter = await getVcsAdapter(projectStorageConfig.onDeviceVcsAdapter);
+        const close = jest.spyOn(adapter, 'close');
         await expect(projectStorageManager.loadProject()).rejects.toThrow(/Branch.*not found/);
+        expect(close).toHaveBeenCalledTimes(1);
         await projectStorageManager.createProject();
         expect([...projectStorageManager.onDeviceRepo.headStore.find()]).toEqual([]);
     });
@@ -80,6 +84,15 @@ describe("ProjectStorageManager base functionality", () => {
     test("Erase local storage before initialization", async () => {
         // Should not throw, just log warning
         await projectStorageManager.eraseLocalStorage();
+    });
+
+    test('Failed integrity verification closes the diagnostic adapter', async () => {
+        const adapter = await getVcsAdapter(projectStorageConfig.onDeviceVcsAdapter);
+        const close = jest.spyOn(adapter, 'close');
+        jest.spyOn(Repository, 'open').mockRejectedValue(new RepositoryIntegrityError('hash mismatch'));
+        jest.spyOn(adapter, 'getCommitGraph').mockRejectedValueOnce(new Error('diagnostic failed'));
+        await expect(projectStorageManager.loadProject()).rejects.toThrow('diagnostic failed');
+        expect(close).toHaveBeenCalledTimes(1);
     });
 
     test("Constructor throws on branch name mismatch", () => {

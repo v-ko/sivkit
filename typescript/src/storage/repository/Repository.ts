@@ -141,29 +141,27 @@ export class Repository {
 
         log.info(`Opening repository with caching: ${enableCaching}, VCS adapter: ${config.name}`);
 
-        //
-        const commitGraph = await repo._vcsAdapter.getCommitGraph();
-        const allBranches = commitGraph.branches();
-        const allCommits = commitGraph.commits();
-        log.info(`[Repository.open] Loaded commit graph for branch "${repo._currentBranch}". ` +
-            `Branches (${allBranches.length}): [${allBranches.map(b => b.name).join(', ')}], ` +
-            `Commits: ${allCommits.length}`);
-
-        let branch = commitGraph.branch(repo._currentBranch);
-        if (branch === undefined) {
-            throw new MissingBranchError(`Branch "${repo._currentBranch}" not found in the commit graph. ` +
-                `Branches (${allBranches.length}): [${allBranches.map(b => b.name).join(', ')}], ` +
-                `Commits: ${allCommits.length}, ` +
-                `VCS adapter: ${config.name}, projectId: ${config.args.projectId}`);
-        }
-
-        if (!repo._isCaching) {
-            log.info(`Repository opened without caching. Using VCS adapter: ${config.name}`);
-            return repo;
-        }
-
-        // (ONLY IF CACHING ENABLED)
         try {
+            const commitGraph = await repo._vcsAdapter.getCommitGraph();
+            const allBranches = commitGraph.branches();
+            const allCommits = commitGraph.commits();
+            log.info(`[Repository.open] Loaded commit graph for branch "${repo._currentBranch}". ` +
+                `Branches (${allBranches.length}): [${allBranches.map(b => b.name).join(', ')}], ` +
+                `Commits: ${allCommits.length}`);
+
+            let branch = commitGraph.branch(repo._currentBranch);
+            if (branch === undefined) {
+                throw new MissingBranchError(`Branch "${repo._currentBranch}" not found in the commit graph. ` +
+                    `Branches (${allBranches.length}): [${allBranches.map(b => b.name).join(', ')}], ` +
+                    `Commits: ${allCommits.length}, ` +
+                    `VCS adapter: ${config.name}, projectId: ${config.args.projectId}`);
+            }
+
+            if (!repo._isCaching) {
+                log.info(`Repository opened without caching. Using VCS adapter: ${config.name}`);
+                return repo;
+            }
+
             if (headStoreData) {
                 // Populate headStore from provided entity data (e.g. domain store)
                 for (const entity of headStoreData) {
@@ -193,40 +191,38 @@ export class Repository {
                 repo._hashTree = await buildHashTree(repo.headStore);
                 await repo.hydrateCacheFromVcsAdapter();
             }
-        } catch (e) {
-            // Corruption is not recoverable in place. Close the adapter connection
-            // so the caller's rebuild (deleteDB) is not blocked, then propagate
-            // the typed error for the policy layer to handle.
-            if (e instanceof CorruptVcsStoreError) {
-                log.error('VCS store corrupt during cache hydration; closing adapter for rebuild', e);
-                repo._vcsAdapter.close();
-            }
-            throw e;
+            log.info(`Repository opened with caching enabled. Using VCS adapter: ${config.name}`);
+            return repo;
+        } catch (error) {
+            // The caller never receives a failed repository and cannot close it.
+            repo.close();
+            throw error;
         }
-
-        log.info(`Repository opened with caching enabled. Using VCS adapter: ${config.name}`);
-        return repo;
     }
 
     static async create(config: VcsAdapterConfig, enableCaching: boolean): Promise<Repository> {
         const repo = await Repository.init(config, enableCaching);
 
-        // Create the default branch on the adappters
-        // Locally the default is created in the constructor (to use for pull from adapetr)
-        await repo._vcsAdapter.applyUpdate({
-            addedCommits: [],
-            removedCommits: [],
-            updatedCommits: [],
-            addedBranches: [{ name: repo._currentBranch, head_commit_id: null }],
-            updatedBranches: [],
-            removedBranches: []
-        });
+        try {
+            // The constructor creates the cached branch; persist it in the adapter.
+            await repo._vcsAdapter.applyUpdate({
+                addedCommits: [],
+                removedCommits: [],
+                updatedCommits: [],
+                addedBranches: [{ name: repo._currentBranch, head_commit_id: null }],
+                updatedBranches: [],
+                removedBranches: []
+            });
 
-        log.info(`Created repository with caching: ${enableCaching}, current branch: ${repo._currentBranch}`);
-        if (repo._isCaching) {
-            repo._hashTree = await buildHashTree(repo.headStore);
+            log.info(`Created repository with caching: ${enableCaching}, current branch: ${repo._currentBranch}`);
+            if (repo._isCaching) {
+                repo._hashTree = await buildHashTree(repo.headStore);
+            }
+            return repo;
+        } catch (error) {
+            repo.close();
+            throw error;
         }
-        return repo;
     }
 
     get headStore(): InMemoryStore {

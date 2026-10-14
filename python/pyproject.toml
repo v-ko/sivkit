@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sivkit"
-version = "0.12.1"
+version = "0.13.0"
 description = "An experimental state manager"
 authors = [{ name = "Petko Dichev", email = "pditchev@gmail.com" }]
 license = { text = "GPLv3" }

@@ -1,4 +1,4 @@
-import { ProjectStorageManager, ProjectStorageConfig, StorageAddon } from './ProjectStorageManager';
+import { ProjectStorageManager, ProjectStorageConfig, StorageAddon, eraseProjectLocalStorage } from './ProjectStorageManager';
 import { Delta, DeltaData } from '../../model/Delta';
 import { RepoUpdateData } from "../repository/Repository"
 import { createId } from '../../util/base';
@@ -20,6 +20,21 @@ export class RepositoryConfigMismatchError extends Error {
         super(message);
         this.name = "RepositoryConfigMismatchError";
     }
+}
+
+/** Commit/load admission failed because the project's storage is no longer open. */
+export class ProjectStorageLifecycleError extends Error {
+    constructor(projectId: string) {
+        super(`Project ${projectId} storage is closing or not loaded`);
+        this.name = 'ProjectStorageLifecycleError';
+    }
+}
+
+export interface StorageAddonDescriptor {
+    name: string;
+    create: (psm: ProjectStorageManager) => StorageAddon;
+    /** Erases addon-owned local data after teardown, without constructing an addon. */
+    eraseLocalStorage?: (config: ProjectStorageConfig) => Promise<void>;
 }
 
 export interface ProjectData {
@@ -108,14 +123,19 @@ export class StorageService implements StorageServiceInterface {
     id: string = createId(8)
     private repoManagers: { [key: string]: ProjectStorageManager } = {}; // Per projectId
     private repoRefCounts: { [key: string]: number } = {}; // Per projectId - reference counting
+    // Creation owns a temporary manager; loading owns the shared manager above.
+    private _creations = new Map<string, Promise<void>>();
+    private _loads = new Map<string, Promise<void>>();
+    private _teardowns = new Map<string, Promise<void>>();
+    private _removals = new Map<string, Promise<void>>();
     private _storageUpdateChannel: Channel;
     private _storageUpdateSubscription: Subscription | null = null;
 
     // Addon descriptors
-    private _addons: { name: string, create: (psm: ProjectStorageManager) => StorageAddon }[];
+    private _addons: StorageAddonDescriptor[];
 
     constructor(
-        addons?: { name: string, create: (psm: ProjectStorageManager) => StorageAddon }[],
+        addons?: StorageAddonDescriptor[],
     ) {
         this._addons = addons ?? [];
 
@@ -139,29 +159,42 @@ export class StorageService implements StorageServiceInterface {
     }
 
     async loadProject(projectId: string, projectStorageConfig: ProjectStorageConfig, projectUri?: string): Promise<void> {
-        /**
-         * Creates the Repo manager (if not already present) and increments reference count.
-         */
+        if (this._removals.has(projectId)) throw new ProjectStorageLifecycleError(projectId);
+        const pending = this._teardowns.get(projectId) ?? this._creations.get(projectId);
+        if (pending) {
+            await pending;
+            return this.loadProject(projectId, projectStorageConfig, projectUri);
+        }
+
         let repoManager = this.repoManagers[projectId];
         if (!repoManager) {
             repoManager = new ProjectStorageManager(projectStorageConfig, this);
-
-            // Attach addons
-            for (const addonDesc of this._addons) {
-                repoManager.addAddon(addonDesc.name, addonDesc.create(repoManager));
-            }
-
-            await repoManager.loadProject(projectUri);
-
             this.repoManagers[projectId] = repoManager;
             this.repoRefCounts[projectId] = 0;
-
-            log.info('Initialized repo manager for project', projectId);
-        } else { // Repo already loaded
-            log.info(`Repo manager already loaded for project ${projectId}. Skipping initialization.`);
-            // Check that the configs are the same
-            // deep compare the configs
-            let configsAreTheSame = JSON.stringify(repoManager.config) === JSON.stringify(projectStorageConfig);
+            const manager = repoManager;
+            // Register before initialization can yield or invoke addon code.
+            const initialization = Promise.resolve().then(async () => {
+                try {
+                    for (const descriptor of this._addons) {
+                        manager.addAddon(descriptor.name, descriptor.create(manager));
+                    }
+                    await manager.loadProject(projectUri);
+                } catch (error) {
+                    try {
+                        await manager.shutdown();
+                    } finally {
+                        delete this.repoManagers[projectId];
+                        delete this.repoRefCounts[projectId];
+                    }
+                    throw error;
+                } finally {
+                    this._loads.delete(projectId);
+                }
+            });
+            this._loads.set(projectId, initialization);
+        } else {
+            // An existing manager may still be loading; all callers must agree.
+            const configsAreTheSame = JSON.stringify(repoManager.config) === JSON.stringify(projectStorageConfig);
             if (!configsAreTheSame) {
                 log.error('Repo already loaded with different config', projectId);
                 log.error('Loaded config', repoManager.config);
@@ -170,7 +203,15 @@ export class StorageService implements StorageServiceInterface {
             }
         }
 
-        // Increment reference count
+        const initialization = this._loads.get(projectId);
+        if (initialization) await initialization;
+        if (this._removals.has(projectId)) throw new ProjectStorageLifecycleError(projectId);
+        const pendingTeardown = this._teardowns.get(projectId);
+        if (pendingTeardown) {
+            await pendingTeardown;
+            return this.loadProject(projectId, projectStorageConfig, projectUri);
+        }
+        // Every successful caller owns one reference to the shared manager.
         this.repoRefCounts[projectId]++;
     }
 
@@ -186,67 +227,90 @@ export class StorageService implements StorageServiceInterface {
         this.repoRefCounts[projectId]--;
 
         if (this.repoRefCounts[projectId] <= 0) {
-            let repoManager = this.repoManagers[projectId];
-            await repoManager.shutdown();
-
-            delete this.repoRefCounts[projectId];
-            delete this.repoManagers[projectId];
-            log.info('Unloaded repo for project', projectId);
+            await this._closeProject(projectId);
         }
     }
 
+    private _closeProject(projectId: string): Promise<void> {
+        const existing = this._teardowns.get(projectId);
+        if (existing) return existing;
+        const closeAdmission = (): Promise<ProjectStorageManager | undefined> => navigator.locks.request(`storage-commit-${projectId}`, () => {
+            const manager = this.repoManagers[projectId];
+            if (manager) manager.closing = true;
+            return manager;
+        });
+        const initialization = this._loads.get(projectId) ?? this._creations.get(projectId);
+        // Reserve the lock immediately for an open project. Initialization,
+        // when present, must settle before its adapters can be shut down.
+        const admission = initialization
+            ? initialization.then(closeAdmission, () => undefined)
+            : closeAdmission();
+        const teardown = admission.then(async manager => {
+            if (!manager) return;
+            // Addons may need the commit lock while draining: never hold it here.
+            try {
+                await manager.shutdown();
+            } finally {
+                delete this.repoManagers[projectId];
+                delete this.repoRefCounts[projectId];
+            }
+        }).finally(() => { this._teardowns.delete(projectId); });
+        this._teardowns.set(projectId, teardown);
+        return teardown;
+    }
+
     async createProject(projectId: string, projectStorageConfig: ProjectStorageConfig): Promise<string> {
-        let repoManager = this.repoManagers[projectId];
-        if (repoManager) {
-            throw new Error(`Project ${projectId} already exists.`);
+        if (this._removals.has(projectId) || this._teardowns.has(projectId)) {
+            throw new ProjectStorageLifecycleError(projectId);
+        }
+        if (this.repoManagers[projectId] || this._creations.has(projectId)) {
+            throw new Error(`Project ${projectId} already exists or is being created.`);
         }
 
-        repoManager = new ProjectStorageManager(projectStorageConfig, this);
-        await repoManager.createProject();
-
-        log.info(`[createProject] Created repo with head store ${JSON.stringify(repoManager._onDeviceRepo?.headStore)}`)
-        // this.repoManagers[projectId] = repoManager;
-        await repoManager.shutdown();  // Just create it, load separately
-
-        this.repoRefCounts[projectId] = 0;
+        const manager = new ProjectStorageManager(projectStorageConfig, this);
+        // Reserve creation before adapter work starts. Loads wait; removal waits
+        // for cleanup before erasing, even if creation fails partway through.
+        const creation = Promise.resolve().then(async () => {
+            try {
+                await manager.createProject();
+            } finally {
+                await manager.shutdown();
+            }
+        }).finally(() => { this._creations.delete(projectId); });
+        this._creations.set(projectId, creation);
+        await creation;
 
         return deriveProjectUri(projectId, projectStorageConfig.onDeviceVcsAdapter.name);
     }
 
     async removeProject(projectId: string, projectStorageConfig: ProjectStorageConfig): Promise<void> {
-        let repoManager = this.repoManagers[projectId];
-        const wasLoaded = !!repoManager;
-
-        if (!repoManager) {
-            // Temporarily create a PSM to access adapters for erasure
-            repoManager = new ProjectStorageManager(projectStorageConfig, this);
-            await repoManager.loadProject();
-        }
-
-        // Each adapter's eraseStorage() does the right thing:
-        // IndexedDB/CacheAPI erase their data; RestApi adapters are no-ops.
-        await repoManager.eraseLocalStorage();
-
-        log.info(`Removed project ${projectId}`);
-
-        if (wasLoaded) {
-            await this.unloadProject(projectId);
-        } else {
-            await repoManager.shutdown();
-        }
+        const existing = this._removals.get(projectId);
+        if (existing) return existing;
+        // Ignore references: removal is final, and reserves admission immediately.
+        const removal = this._closeProject(projectId).then(async () => {
+            for (const descriptor of [...this._addons].reverse()) {
+                await descriptor.eraseLocalStorage?.(projectStorageConfig);
+            }
+            // Erasure does not load repositories, start addons or connect a bridge.
+            await eraseProjectLocalStorage(projectStorageConfig);
+            log.info(`Removed project ${projectId}`);
+        }).finally(() => { this._removals.delete(projectId); });
+        this._removals.set(projectId, removal);
+        return removal;
     }
 
     async commit(projectId: string, deltaData: DeltaData, message: string): Promise<CommitOperationResult> {
+        const manager = this.repoManagers[projectId];
         return navigator.locks.request(`storage-commit-${projectId}`, async () => {
-            return this._executeCommitRequest(projectId, deltaData, message);
+            return this._executeCommitRequest(projectId, deltaData, message, manager);
         });
     }
 
-    private async _executeCommitRequest(projectId: string, deltaData: DeltaData, message: string): Promise<CommitOperationResult> {
+    private async _executeCommitRequest(projectId: string, deltaData: DeltaData, message: string, admittedManager?: ProjectStorageManager): Promise<CommitOperationResult> {
         const repoManager = this.repoManagers[projectId];
 
-        if (!repoManager) {
-            throw new Error("Repo not loaded");
+        if (!repoManager || repoManager !== admittedManager || repoManager.closing || this._loads.has(projectId)) {
+            throw new ProjectStorageLifecycleError(projectId);
         }
 
         const delta = new Delta(deltaData);

@@ -12,6 +12,7 @@ import { loadFromDict } from "../../model/Entity";
 import { Delta, DeltaData } from "../../model/Delta";
 import { Change } from "../../model/Change";
 import type { CommitData } from "../version-control/Commit";
+import { IndexedDBVcsAdapter } from "../repository/IndexedDBVcsAdapter";
 
 let log = getLogger('ProjectStorageManager');
 
@@ -30,7 +31,7 @@ export interface StorageAddon {
     onProjectLoading?(): Promise<void>;
     /** Called after VCS is open and headStore is populated. Use for poll loop start. */
     onProjectLoaded(): Promise<void>;
-    /** Called at the start of unload. Use for poll loop stop and bridge teardown. */
+    /** Called in reverse registration order. Dependencies must be registered first. */
     onProjectUnloading(): Promise<void>;
     /** Called in the commit lock after each local commit, before the squash. Errors are logged. */
     onCommitted?(commit: CommitData): void;
@@ -60,21 +61,13 @@ export interface FileStoreAdapterArgs {
 
 export type FileStoreAdapterNames = "InMemory" | "CacheAPI" | "RestApi";
 
-async function initFileStore(config: FileStoreConfig): Promise<FileStoreAdapter> {
-    let fileStore: FileStoreAdapter;
-
+function createFileStore(config: FileStoreConfig): FileStoreAdapter {
     switch (config.name) {
         case "InMemory": {
-            let inMemFileStore = new InMemoryFileStoreAdapter();
-            fileStore = inMemFileStore
-            break;
+            return new InMemoryFileStoreAdapter();
         }
         case "CacheAPI": {
-            let cacheFileStore = new CacheFileStoreAdapter(config.args.projectId);
-            await cacheFileStore.init();
-            log.info('Initialized CacheFileStoreAdapter for project', config.args.projectId);
-            fileStore = cacheFileStore
-            break;
+            return new CacheFileStoreAdapter(config.args.projectId);
         }
         case "RestApi": {
             const { userId, projectId, baseUrl, auth } = config.args;
@@ -87,15 +80,32 @@ async function initFileStore(config: FileStoreConfig): Promise<FileStoreAdapter>
             if (!auth) {
                 throw new Error("RestApi file store requires args.auth in config");
             }
-            fileStore = new RestApiFileStoreAdapter(userId, projectId, baseUrl, auth);
-            break;
+            return new RestApiFileStoreAdapter(userId, projectId, baseUrl, auth);
         }
         default: {
             throw new Error(`Unknown file store name: ${config.name}`)
         }
     }
+}
 
-    return fileStore
+async function initFileStore(config: FileStoreConfig): Promise<FileStoreAdapter> {
+    const fileStore = createFileStore(config);
+    if (fileStore instanceof CacheFileStoreAdapter) await fileStore.init();
+    return fileStore;
+}
+
+/** Delete by configuration after session teardown, without opening local stores. */
+export async function eraseProjectLocalStorage(config: ProjectStorageConfig): Promise<void> {
+    const vcsConfig = config.onDeviceVcsAdapter;
+    const adapter = vcsConfig.name === 'IndexedDB'
+        ? new IndexedDBVcsAdapter(vcsConfig.args.projectId)
+        : await getVcsAdapter(vcsConfig);
+    try {
+        await adapter.eraseStorage();
+    } finally {
+        adapter.close();
+    }
+    await createFileStore(config.onDeviceFileStore).eraseStorage();
 }
 
 
@@ -139,6 +149,8 @@ export class ProjectStorageManager {
     private _domainStoreAdapter: DomainStoreAdapter | null = null;
     private _addons: Map<string, StorageAddon> = new Map();
     private _projectUri: string | undefined = undefined;
+    /** Set under the service's commit lock before addon teardown begins. */
+    closing = false;
 
     constructor(config: ProjectStorageConfig, parentStorageService: StorageService | null = null) {
         this._config = config
@@ -257,9 +269,13 @@ export class ProjectStorageManager {
                 }
             } else {
                 if (e instanceof RepositoryIntegrityError) {
-                    let storageAdapter = await getVcsAdapter(this.config.onDeviceVcsAdapter);
+                    const storageAdapter = await getVcsAdapter(this.config.onDeviceVcsAdapter);
                     log.error('Attempting repository integrity verification after load failure', e);
-                    await verifyRepositoryIntegrity(storageAdapter, this.config.deviceBranchName);
+                    try {
+                        await verifyRepositoryIntegrity(storageAdapter, this.config.deviceBranchName);
+                    } finally {
+                        storageAdapter.close();
+                    }
                 }
                 throw e;
             }
@@ -309,14 +325,24 @@ export class ProjectStorageManager {
 
     async unloadProject(): Promise<void> {
         log.info('Closing project storage manager')
-        for (const addon of this._addons.values()) {
-            await addon.onProjectUnloading();
+        for (const [name, addon] of [...this._addons].reverse()) {
+            try {
+                await addon.onProjectUnloading();
+            } catch (error) {
+                log.error(`Addon ${name} failed in onProjectUnloading`, error);
+                this._parentStorageService?.reportError(`Storage addon ${name} teardown failed: ${error}`);
+            }
         }
-        if (this._onDeviceRepo) {
-            this._onDeviceRepo.close()
+        this._addons.clear();
+        try {
+            this._onDeviceRepo?.close();
+        } catch (error) {
+            log.error('Failed to close project repository', error);
+            this._parentStorageService?.reportError(`Project repository close failed: ${error}`);
+        } finally {
+            this._onDeviceRepo = null;
+            this._localFileStore = null;
         }
-        this._onDeviceRepo = null;
-        this._localFileStore = null;
     }
 
     async shutdown() {
