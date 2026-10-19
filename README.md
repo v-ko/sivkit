@@ -286,6 +286,7 @@ Column {
 - TypeScript: `cd typescript && npm test` (Jest)
 - Cross-language hash parity: `bash tests/hash-parity/run.sh`, which checks that the Python and TS hash trees produce the same root hashes
 - Serialized entity hash parity and replay: `PYTHON=../dev_venv/bin/python bash tests/hash-parity/run.sh tests/hash-parity/fixtures/entity-data-semantics.json`, which checks exact serialized entity data, checkpoint hashes, and composed/sequential undo.
+- Cross-language portable file names: `PYTHON=../dev_venv/bin/python bash tests/portable-names/run.sh`, which checks that the Python and TS name checks and keys agree on every code point, on curated names and paths, and on every pair of tokens that exercise the rules
 
 Parity fixture files are JSON arrays of test cases. Generated fuzz and database exports contain one named case; regression fixtures contain several. Both language runners execute every case.
 

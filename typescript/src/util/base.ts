@@ -1,5 +1,7 @@
 import slugify from "slugify";
 
+import { checkPortableName } from "./portablePath";
+
 let _fakeTime: Date | null = null;  // For testing purposes
 let _deterministicIds = false;
 
@@ -116,7 +118,9 @@ export function toUriFriendlyFileName(filename: string, maxLength: number): stri
     const truncatedName = name.substring(0, maxNameLength);
 
     // Combine name and extension
-    return truncatedName + extension;
+    const result = truncatedName + extension;
+    // Only an empty or reserved name (`CON`) can fail here
+    return checkPortableName(result) ? result.slice(0, maxLength - 1) + '_' : result;
 }
 
 export function mapMimeTypeToFileExtension(mimeType: string): string {
