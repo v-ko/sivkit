@@ -13,20 +13,20 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+
+from sivkit.storage.fs.ops import UnsafePath, resolve_in_root
+
+__all__ = ["BlobStore", "UnsafePath"]
 
 CONTENT_HASH_HEX_LEN = 32
-
-
-class UnsafePath(Exception):
-    """Raised when a blob path fails safety validation."""
 
 
 class BlobStore:
     """Content-addressed file blob storage."""
 
     def __init__(self, root: Path) -> None:
-        self._root = root
+        self._root = root.absolute()
         self._root.mkdir(parents=True, exist_ok=True)
         self._on_added_callbacks: list[Callable[[str, bytes], None]] = []
 
@@ -62,21 +62,21 @@ class BlobStore:
         """Resolve a relative blob path to an absolute filesystem path.
 
         Returns None if the file doesn't exist.
-        Raises UnsafePath if the path fails safety validation.
+        Raises UnsafePath if the path could lead outside the store root.
         """
-        abs_path = self._resolve_safe(rel_path)
+        abs_path = resolve_in_root(self._root, rel_path)
         if not abs_path.exists():
             return None
         return abs_path
 
     def exists(self, rel_path: str) -> bool:
         """Check if a blob exists at the given relative path."""
-        abs_path = self._resolve_safe(rel_path)
+        abs_path = resolve_in_root(self._root, rel_path)
         return abs_path.exists()
 
     def remove(self, rel_path: str) -> bool:
         """Remove a blob by relative path. Returns True if deleted."""
-        abs_path = self._resolve_safe(rel_path)
+        abs_path = resolve_in_root(self._root, rel_path)
         if not abs_path.exists():
             return False
         abs_path.unlink()
@@ -86,17 +86,6 @@ class BlobStore:
         except OSError:
             pass  # Not empty, that's fine
         return True
-
-    def _resolve_safe(self, rel_path: str) -> Path:
-        """Validate and resolve a relative path within the store root.
-
-        Raises UnsafePath if the path escapes the root.
-        """
-        _check_safe_path(rel_path)
-        abs_path = (self._root / rel_path).resolve()
-        if not abs_path.is_relative_to(self._root.resolve()):
-            raise UnsafePath(f"Path escapes blob store root: {rel_path!r}")
-        return abs_path
 
     def hash_for_data(self, data: bytes) -> str:
         """Compute the content hash for data without storing it."""
@@ -114,10 +103,3 @@ def _hash_to_rel_path(content_hash: str, extension: str) -> str:
         extension if extension.startswith(".") else f".{extension}" if extension else ""
     )
     return f"{prefix}/{content_hash}{ext}"
-
-
-def _check_safe_path(rel_path: str) -> None:
-    """Reject absolute paths and directory traversals."""
-    p = PurePosixPath(rel_path)
-    if p.is_absolute() or ".." in p.parts:
-        raise UnsafePath(f"Unsafe blob path: {rel_path!r}")

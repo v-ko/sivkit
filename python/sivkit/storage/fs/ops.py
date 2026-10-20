@@ -140,6 +140,35 @@ def create_new(path: Path, data: bytes, *, durable: bool = True) -> Fingerprint:
     return _fingerprint(path)
 
 
+def move(
+    src: Path, dst: Path, *, expect: Expect = ANY, durable: bool = True
+) -> Fingerprint:
+    """Renames the file `src` to `dst`; raises `Conflict` if `dst` exists, touching neither.
+
+    Creates missing folders. A crash can leave both names on one file; the
+    caller resolves that. Between file systems (`EXDEV`) it raises.
+    """
+    _check_expect(src, expect)
+    if not stat.S_ISREG(os.lstat(src).st_mode):
+        raise ValueError(f"{src} is not a regular file")
+    _make_folders(dst.parent, durable)
+    if _is_case_only_change(src, dst):
+        os.rename(src, dst)
+    else:
+        try:
+            linked = _publish_no_clobber(src, dst)
+        except FileExistsError:
+            raise Conflict(dst, fingerprint(dst)) from None
+        # The new name must be durable before the old one goes
+        if durable and dst.parent != src.parent:
+            fsync_dir(dst.parent)
+        if linked:
+            os.unlink(src)
+    if durable:
+        fsync_dir(src.parent)
+    return _fingerprint(dst)
+
+
 def delete(path: Path, *, expect: Expect = ANY, durable: bool = True) -> None:
     """Deletes the file `path`. A missing file is fine unless `expect` is a fingerprint."""
     _check_expect(path, expect)
@@ -265,17 +294,33 @@ def _write_temp(path: Path, data: bytes, mode: int | None, durable: bool) -> Pat
     return temp
 
 
-def _publish_no_clobber(temp: Path, path: Path) -> None:
-    """Gives `temp` the name `path`; raises `FileExistsError` if `path` exists."""
+def _publish_no_clobber(src: Path, dst: Path) -> bool:
+    """Gives `src` the name `dst`; raises `FileExistsError` if `dst` exists.
+
+    Returns True if it hard-linked, so `src` still exists.
+    """
     if os.name == "nt":
-        os.rename(temp, path)
-        return
+        os.rename(src, dst)
+        return False
     try:
-        os.link(temp, path)
+        os.link(src, dst)
+        return True
     except OSError as e:
         if e.errno not in _LINK_UNSUPPORTED:
             raise
         # No hard links here (FAT, some network shares): a small window, as in git
-        if os.path.lexists(path):
-            raise FileExistsError(errno.EEXIST, "File exists", str(path)) from None
-        os.rename(temp, path)
+        if os.path.lexists(dst):
+            raise FileExistsError(errno.EEXIST, "File exists", str(dst)) from None
+        os.rename(src, dst)
+        return False
+
+
+def _is_case_only_change(src: Path, dst: Path) -> bool:
+    """`dst` is another spelling of `src`'s own entry, on a case-folding file system."""
+    try:
+        st = os.lstat(src)
+        # With one link, the same inode means the same entry, not a hard-link alias
+        same = st.st_nlink == 1 and os.path.samestat(st, os.lstat(dst))
+        return same and dst.name not in os.listdir(dst.parent)
+    except (FileNotFoundError, NotADirectoryError):
+        return False

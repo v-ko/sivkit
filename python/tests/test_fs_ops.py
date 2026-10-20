@@ -13,8 +13,23 @@ from sivkit.storage.fs.ops import (
     create_new,
     delete,
     fingerprint,
+    move,
     resolve_in_root,
 )
+
+
+@pytest.fixture(params=[True, False], ids=["hard_links", "no_hard_links"])
+def hard_links(request, monkeypatch):
+    if not request.param:
+
+        def no_link(src, dst):
+            raise OSError(errno.EPERM, "Operation not permitted")
+
+        monkeypatch.setattr(os, "link", no_link)
+
+
+def listing(root):
+    return sorted(p.relative_to(root).as_posix() for p in root.rglob("*"))
 
 
 def test_atomic_replace_keeps_mode_and_leaves_no_temp(tmp_path):
@@ -75,15 +90,7 @@ def test_expect_mismatch_writes_nothing(tmp_path):
     assert os.listdir(tmp_path) == []
 
 
-@pytest.mark.parametrize("hard_links", [True, False])
-def test_create_new_never_overwrites(tmp_path, monkeypatch, hard_links):
-    if not hard_links:
-
-        def no_link(src, dst):
-            raise OSError(errno.EPERM, "Operation not permitted")
-
-        monkeypatch.setattr(os, "link", no_link)
-
+def test_create_new_never_overwrites(tmp_path, hard_links):
     page = tmp_path / "page.html"
     done = create_new(page, b"first")
     assert done == fingerprint(page)
@@ -93,6 +100,46 @@ def test_create_new_never_overwrites(tmp_path, monkeypatch, hard_links):
     assert e.value.current == done
     assert page.read_bytes() == b"first"
     assert os.listdir(tmp_path) == ["page.html"]
+
+
+def test_move_never_overwrites(tmp_path, hard_links):
+    a = tmp_path / "a.html"
+    b = tmp_path / "b.html"
+    a.write_bytes(b"a")
+    b.write_bytes(b"b")
+    seen = fingerprint(a)
+
+    with pytest.raises(Conflict) as e:
+        move(a, b)
+    assert e.value.current == fingerprint(b)
+    with pytest.raises(Conflict):
+        move(a, tmp_path / "c.html", expect=ABSENT)
+    assert (a.read_bytes(), b.read_bytes()) == (b"a", b"b")
+
+    # Into a new folder, as the same file
+    done = move(a, tmp_path / "sub" / "a.html", expect=seen)
+    assert done.inode == seen.inode
+    assert listing(tmp_path) == ["b.html", "sub", "sub/a.html"]
+
+
+def test_move_refuses_another_name_of_the_same_file(tmp_path):
+    page = tmp_path / "page.html"
+    page.write_bytes(b"x")
+    os.link(page, tmp_path / "copy.html")
+
+    with pytest.raises(Conflict):
+        move(page, tmp_path / "copy.html")
+    assert sorted(os.listdir(tmp_path)) == ["copy.html", "page.html"]
+
+
+def test_move_case_only(tmp_path):
+    page = tmp_path / "page.html"
+    page.write_bytes(b"x")
+    if not (tmp_path / "PAGE.HTML").exists():
+        pytest.skip("case-only renames need a case-folding file system")
+
+    move(page, tmp_path / "Page.html")
+    assert os.listdir(tmp_path) == ["Page.html"]
 
 
 def test_resolve_in_root_refuses_escapes(tmp_path):
