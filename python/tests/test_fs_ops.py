@@ -1,18 +1,20 @@
 import errno
 import os
-import time
+import unicodedata
 
 import pytest
 
+from sivkit.storage.fs.names import UnsafeName
 from sivkit.storage.fs.ops import (
     ABSENT,
     Conflict,
     UnsafePath,
     atomic_replace,
-    clean_temps,
+    check_new_path,
     create_new,
     delete,
     fingerprint,
+    make_folder,
     move,
     resolve_in_root,
 )
@@ -43,13 +45,42 @@ def test_atomic_replace_keeps_mode_and_leaves_no_temp(tmp_path):
     assert page.stat().st_mode & 0o777 == 0o640
     assert done == fingerprint(page)
 
-    # Missing folders are created; a long name gets a hashed temp name
-    long_name = tmp_path / "a" / "b" / ("x" * 250)
+    # A long name gets a hashed temp name
+    long_name = tmp_path / ("x" * 250)
     atomic_replace(long_name, b"data", expect=ABSENT)
     assert long_name.read_bytes() == b"data"
-    assert sorted(p.name for p in tmp_path.rglob("*")) == sorted(
-        ["page.html", "a", "b", "x" * 250]
-    )
+    assert sorted(os.listdir(tmp_path)) == ["page.html", "x" * 250]
+
+
+def test_writes_need_an_existing_folder(tmp_path, hard_links):
+    page = tmp_path / "page.html"
+    page.write_bytes(b"p")
+    missing = tmp_path / "missing" / "page.html"
+
+    for write in [
+        lambda: atomic_replace(missing, b"x"),
+        lambda: create_new(missing, b"x"),
+        lambda: move(page, missing),
+    ]:
+        with pytest.raises(FileNotFoundError):
+            write()
+    assert os.listdir(tmp_path) == ["page.html"]
+
+
+def test_make_folder(tmp_path):
+    (tmp_path / "page.html").write_bytes(b"p")
+
+    make_folder(tmp_path / "notes")
+    make_folder(tmp_path / "notes")  # Already there is fine
+    with pytest.raises(FileNotFoundError):
+        make_folder(tmp_path / "missing" / "sub")
+    with pytest.raises(Conflict) as e:
+        make_folder(tmp_path / "page.html")
+    assert e.value.current == fingerprint(tmp_path / "page.html")
+    (tmp_path / "linked").symlink_to(tmp_path / "notes")
+    with pytest.raises(Conflict):
+        make_folder(tmp_path / "linked")
+    assert sorted(os.listdir(tmp_path)) == ["linked", "notes", "page.html"]
 
 
 @pytest.mark.parametrize("failing", ["fsync", "replace"])
@@ -116,7 +147,8 @@ def test_move_never_overwrites(tmp_path, hard_links):
         move(a, tmp_path / "c.html", expect=ABSENT)
     assert (a.read_bytes(), b.read_bytes()) == (b"a", b"b")
 
-    # Into a new folder, as the same file
+    # Into another folder, as the same file
+    make_folder(tmp_path / "sub")
     done = move(a, tmp_path / "sub" / "a.html", expect=seen)
     assert done.inode == seen.inode
     assert listing(tmp_path) == ["b.html", "sub", "sub/a.html"]
@@ -153,13 +185,20 @@ def test_resolve_in_root_refuses_escapes(tmp_path):
     assert resolve_in_root(root, "notes/new/page.html") == root / "notes/new/page.html"
     # The root itself may be a link
     (tmp_path / "root-link").symlink_to(root)
-    resolve_in_root(tmp_path / "root-link", "./notes/a")
+    resolve_in_root(tmp_path / "root-link", "notes/a")
+    # Too long to exist: left to the name rules
+    resolve_in_root(root, "x" * 300)
 
     for rel in [
         "",
         "/etc/passwd",
         "../outside/x",
         "notes/../../outside",
+        "./notes/a",
+        "notes//a",
+        "notes/",
+        "missing/a\0b",
+        "missing/\ud800",
         "linked/x",
         "notes/page.html",
     ]:
@@ -167,24 +206,45 @@ def test_resolve_in_root_refuses_escapes(tmp_path):
             resolve_in_root(root, rel)
 
 
-def test_clean_temps_deletes_only_old_temps(tmp_path):
-    old = time.time() - 3600
-    names = {
-        "a/.page.html.0123456789abcdef.tmp": old,  # deleted
-        "a/.page.html.0123456789abcdef.tmp.bak": old,
-        "a/.page.html.tmp": old,
-        "a/page.html.tmp": old,
-        ".young.html.0123456789abcdef.tmp": time.time(),
-        "ignored/.page.html.0123456789abcdef.tmp": old,
-    }
-    for rel, mtime in names.items():
-        path = tmp_path / rel
-        path.parent.mkdir(exist_ok=True)
-        path.write_bytes(b"")
-        os.utime(path, (mtime, mtime))
+def refusal(root, rel, source=None):
+    try:
+        check_new_path(root, rel, source=source)
+    except UnsafeName as e:
+        return e.reason
+    return None
 
-    assert clean_temps(tmp_path, lambda rel: rel == "ignored") == []
-    left = {
-        p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()
-    }
-    assert left == set(names) - {"a/.page.html.0123456789abcdef.tmp"}
+
+def test_check_new_path_refuses_colliding_names(tmp_path):
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "a.html").write_bytes(b"a")
+    (tmp_path / "Page.html").write_bytes(b"p")
+
+    assert refusal(tmp_path, "Notes/b.html") == "collision"
+    assert refusal(tmp_path, "notes/A.html") == "collision"
+    assert refusal(tmp_path, "PAGE.html", source="notes/a.html") == "collision"
+    assert refusal(tmp_path, "notes/b.html") is None
+    assert refusal(tmp_path, "new/sub/b.html") is None
+    # The renamed file itself isn't a sibling, but can't become a folder
+    assert refusal(tmp_path, "page.html", source="Page.html") is None
+    assert refusal(tmp_path, "page.html/b.html", source="Page.html") == "collision"
+
+    with pytest.raises(Conflict) as e:
+        check_new_path(tmp_path, "Page.html/x.html")
+    assert e.value.path == tmp_path / "Page.html"
+
+
+def test_check_new_path_polices_only_new_names(tmp_path):
+    nfd = unicodedata.normalize("NFD", "Café")
+    (tmp_path / nfd).mkdir()
+    (tmp_path / f"{nfd}.html").write_bytes(b"x")
+
+    assert refusal(tmp_path, f"{nfd}/new.html") is None
+    assert refusal(tmp_path, f"{nfd}.html") is None
+
+    assert refusal(tmp_path, "a:b.html") == "char"
+    assert refusal(tmp_path, f"new {nfd}.html") == "not_nfc"
+    assert refusal(tmp_path, "new./a.html") == "trailing"
+    assert refusal(tmp_path, "aux.html", source=f"{nfd}.html") == "reserved"
+    assert refusal(tmp_path, "x" * 300) == "part_length"
+    assert refusal(tmp_path, "/".join(["d" * 200] * 6)) == "path_length"
+    assert refusal(tmp_path, "/".join(["d"] * 40)) == "depth"

@@ -1,20 +1,26 @@
 """File operations: blocking, with every policy choice an explicit argument.
 
 See `docs/adr/102-file-system-access.md`. Callers resolve paths with
-`resolve_in_root` first; these functions take the resulting paths.
+`resolve_in_root` first; these functions take the resulting paths. Writes
+don't create folders: a missing one raises `FileNotFoundError`.
 """
 
 import errno
 import hashlib
 import os
-import re
 import secrets
 import stat
-import time
-from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
 from typing import NamedTuple
+
+from sivkit.storage.fs.names import (
+    MAX_DEPTH,
+    MAX_PATH_BYTES,
+    UnsafeName,
+    canonical_key,
+    check_portable_name,
+)
 
 
 class Fingerprint(NamedTuple):
@@ -51,7 +57,6 @@ class UnsafePath(ValueError):
         self.reason = reason
 
 
-_TEMP_PATTERN = re.compile(r"\..+\.[0-9a-f]{16}\.tmp", re.DOTALL)
 _TEMP_EXTRA_BYTES = len(".") + len(".0123456789abcdef.tmp")
 _MAX_NAME_BYTES = 255
 _LINK_UNSUPPORTED = {errno.EPERM, errno.EOPNOTSUPP, errno.ENOTSUP, errno.ENOSYS}
@@ -65,6 +70,10 @@ def fingerprint(path: Path) -> Fingerprint | None:
         st = os.lstat(path)
     except (FileNotFoundError, NotADirectoryError):
         return None
+    except OSError as e:
+        if e.errno == errno.ENAMETOOLONG:
+            return None  # Can't exist
+        raise
     return Fingerprint(st.st_size, st.st_mtime_ns, st.st_ino)
 
 
@@ -75,24 +84,32 @@ def resolve_in_root(root: Path, rel: str) -> Path:
     parts below it may not be symlinks or Windows junctions. A check, not a
     sandbox: a concurrent change to the tree can still redirect a later write.
     """
-    if rel == "":
-        raise UnsafePath(rel, "empty")
     if rel.startswith("/"):
         raise UnsafePath(rel, "absolute")
     if os.name == "nt" and ("\\" in rel or ":" in rel):
         raise UnsafePath(rel, "windows_syntax")
     parts = rel.split("/")
-    if ".." in parts:
+    if "" in parts:
+        raise UnsafePath(rel, "empty")
+    if "." in parts or ".." in parts:
         raise UnsafePath(rel, "dot")
+    if "\0" in rel:
+        raise UnsafePath(rel, "char")
+    try:
+        os.fsencode(rel)
+    except UnicodeEncodeError:
+        raise UnsafePath(rel, "char") from None
     path = root
     for part in parts:
-        if part in ("", "."):
-            continue
         path = path / part
         try:
             st = os.lstat(path)
         except (FileNotFoundError, NotADirectoryError):
             break
+        except OSError as e:
+            if e.errno == errno.ENAMETOOLONG:
+                break  # Can't exist; the name rules report it
+            raise
         if (
             stat.S_ISLNK(st.st_mode)
             or getattr(st, "st_reparse_tag", 0) == _JUNCTION_TAG
@@ -101,15 +118,44 @@ def resolve_in_root(root: Path, rel: str) -> Path:
     return root / rel
 
 
+def check_new_path(root: Path, rel: str, *, source: str | None = None) -> None:
+    """Raises `UnsafeName` if a name that `rel` would introduce isn't portable or collides.
+
+    A part is introduced if its folder has no entry of exactly that name;
+    existing names are never checked. Introduced names are compared by
+    `canonical_key` with their siblings on disk; `source` (a file being
+    renamed to `rel`) doesn't count as one. Raises `Conflict` if an existing
+    file is used as a folder.
+    """
+    folder = ""
+    is_new = False
+    parts = rel.split("/")
+    for depth, part in enumerate(parts, 1):
+        # Below a new part nothing exists yet
+        siblings = {} if is_new else _listing_by_key(root / folder)
+        same_key = siblings.get(canonical_key(part), [])
+        if part not in same_key:
+            if not is_new:
+                is_new = True
+                _check_path_limits(rel)
+            try:
+                check_portable_name(part)
+            except UnsafeName as e:
+                raise UnsafeName(rel, e.reason) from None
+            vacated = source if depth == len(parts) else None
+            if any(_join(folder, s) != vacated for s in same_key):
+                raise UnsafeName(rel, "collision")
+        folder = _join(folder, part)
+
+
 def atomic_replace(
     path: Path, data: bytes, *, expect: Expect = ANY, durable: bool = True
 ) -> Fingerprint:
     """Replaces or creates `path` with `data`; a crash leaves the old or the new file.
 
-    Keeps the old file's mode. Creates missing folders.
+    Keeps the old file's mode.
     """
     _check_expect(path, expect)
-    _make_folders(path.parent, durable)
     try:
         mode = stat.S_IMODE(os.stat(path).st_mode)
     except FileNotFoundError:
@@ -127,7 +173,6 @@ def atomic_replace(
 
 def create_new(path: Path, data: bytes, *, durable: bool = True) -> Fingerprint:
     """Creates `path` with `data`; raises `Conflict` if it exists, without touching it."""
-    _make_folders(path.parent, durable)
     temp = _write_temp(path, data, None, durable)
     try:
         _publish_no_clobber(temp, path)
@@ -145,13 +190,12 @@ def move(
 ) -> Fingerprint:
     """Renames the file `src` to `dst`; raises `Conflict` if `dst` exists, touching neither.
 
-    Creates missing folders. A crash can leave both names on one file; the
-    caller resolves that. Between file systems (`EXDEV`) it raises.
+    A crash can leave both names on one file; the caller resolves that.
+    Between file systems (`EXDEV`) it raises.
     """
     _check_expect(src, expect)
     if not stat.S_ISREG(os.lstat(src).st_mode):
         raise ValueError(f"{src} is not a regular file")
-    _make_folders(dst.parent, durable)
     if _is_case_only_change(src, dst):
         os.rename(src, dst)
     else:
@@ -182,6 +226,21 @@ def delete(path: Path, *, expect: Expect = ANY, durable: bool = True) -> None:
         fsync_dir(path.parent)
 
 
+def make_folder(path: Path, *, durable: bool = True) -> None:
+    """Creates the folder `path`; its parent must exist. An existing folder is fine.
+
+    Raises `Conflict` if something else is at `path`.
+    """
+    try:
+        os.mkdir(path)
+    except FileExistsError:
+        if not stat.S_ISDIR(os.lstat(path).st_mode):
+            raise Conflict(path, fingerprint(path)) from None
+        return
+    if durable:
+        fsync_dir(path.parent)
+
+
 def fsync_dir(path: Path) -> None:
     """Makes the folder's entries durable. No-op on Windows."""
     if os.name == "nt":
@@ -197,51 +256,28 @@ def fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def clean_temps(
-    root: Path, ignore: Callable[[str], bool], *, min_age: float = 60
-) -> list[str]:
-    """Deletes this module's temp files older than `min_age` seconds.
-
-    `ignore` takes `/`-separated paths relative to `root`; ignored folders
-    aren't entered. Returns the relative paths that couldn't be listed or deleted.
-    """
-    failed: list[str] = []
-
-    def rel_of(path: str) -> str:
-        return Path(path).relative_to(root).as_posix()
-
-    cutoff = time.time() - min_age
-    walk = os.walk(root, onerror=lambda e: failed.append(rel_of(e.filename)))
-    for folder, dirs, files in walk:
-        # os.walk skips symlinked folders but enters junctions
-        dirs[:] = [
-            d
-            for d in dirs
-            if not _is_junction(os.path.join(folder, d))
-            and not ignore(rel_of(os.path.join(folder, d)))
-        ]
-        for name in files:
-            if not _TEMP_PATTERN.fullmatch(name):
-                continue
-            path = os.path.join(folder, name)
-            if ignore(rel_of(path)):
-                continue
-            try:
-                st = os.lstat(path)
-                if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
-                    os.unlink(path)
-            except FileNotFoundError:
-                pass
-            except OSError:
-                failed.append(rel_of(path))
-    return failed
+def _join(folder: str, name: str) -> str:
+    return f"{folder}/{name}" if folder else name
 
 
-def _is_junction(path: str) -> bool:
+def _listing_by_key(folder: Path) -> dict[str, list[str]]:
     try:
-        return getattr(os.lstat(path), "st_reparse_tag", 0) == _JUNCTION_TAG
-    except OSError:
-        return False
+        names = os.listdir(folder)
+    except FileNotFoundError:
+        return {}
+    except NotADirectoryError:
+        raise Conflict(folder, fingerprint(folder)) from None
+    by_key: dict[str, list[str]] = {}
+    for name in names:
+        by_key.setdefault(canonical_key(name), []).append(name)
+    return by_key
+
+
+def _check_path_limits(rel: str) -> None:
+    if len(rel.encode("utf-8", "surrogatepass")) > MAX_PATH_BYTES:
+        raise UnsafeName(rel, "path_length")
+    if rel.count("/") + 1 > MAX_DEPTH:
+        raise UnsafeName(rel, "depth")
 
 
 def _fingerprint(path: Path) -> Fingerprint:
@@ -255,17 +291,6 @@ def _check_expect(path: Path, expect: Expect) -> None:
     current = fingerprint(path)
     if current != (None if expect is ABSENT else expect):
         raise Conflict(path, current)
-
-
-def _make_folders(folder: Path, durable: bool) -> None:
-    missing = []
-    while not folder.exists():
-        missing.append(folder)
-        folder = folder.parent
-    for created in reversed(missing):
-        created.mkdir(exist_ok=True)
-        if durable:
-            fsync_dir(created.parent)
 
 
 def _temp_name(name: str) -> str:
