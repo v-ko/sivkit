@@ -7,6 +7,7 @@ don't create folders: a missing one raises `FileNotFoundError`.
 
 import errno
 import hashlib
+import logging
 import os
 import secrets
 import stat
@@ -21,6 +22,8 @@ from sivkit.storage.fs.names import (
     canonical_key,
     check_portable_name,
 )
+
+log = logging.getLogger(__name__)
 
 
 class Fingerprint(NamedTuple):
@@ -123,9 +126,9 @@ def check_new_path(root: Path, rel: str, *, source: str | None = None) -> None:
 
     A part is introduced if its folder has no entry of exactly that name;
     existing names are never checked. Introduced names are compared by
-    `canonical_key` with their siblings on disk; `source` (a file being
-    renamed to `rel`) doesn't count as one. Raises `Conflict` if an existing
-    file is used as a folder.
+    `canonical_key` with their siblings on disk. `source` is a file being
+    renamed to `rel`: it doesn't count as a sibling, and its name, if kept,
+    isn't checked. Raises `Conflict` if an existing file is used as a folder.
     """
     folder = ""
     is_new = False
@@ -138,11 +141,12 @@ def check_new_path(root: Path, rel: str, *, source: str | None = None) -> None:
             if not is_new:
                 is_new = True
                 _check_path_limits(rel)
-            try:
-                check_portable_name(part)
-            except UnsafeName as e:
-                raise UnsafeName(rel, e.reason) from None
             vacated = source if depth == len(parts) else None
+            if vacated is None or part != vacated.rpartition("/")[2]:
+                try:
+                    check_portable_name(part)
+                except UnsafeName as e:
+                    raise UnsafeName(rel, e.reason) from None
             if any(_join(folder, s) != vacated for s in same_key):
                 raise UnsafeName(rel, "collision")
         folder = _join(folder, part)
@@ -164,7 +168,7 @@ def atomic_replace(
     try:
         os.replace(temp, path)
     except BaseException:
-        temp.unlink(missing_ok=True)
+        _discard(temp)
         raise
     if durable:
         fsync_dir(path.parent)
@@ -179,7 +183,7 @@ def create_new(path: Path, data: bytes, *, durable: bool = True) -> Fingerprint:
     except FileExistsError:
         raise Conflict(path, fingerprint(path)) from None
     finally:
-        temp.unlink(missing_ok=True)
+        _discard(temp)
     if durable:
         fsync_dir(path.parent)
     return _fingerprint(path)
@@ -314,9 +318,17 @@ def _write_temp(path: Path, data: bytes, mode: int | None, durable: bool) -> Pat
             if durable:
                 os.fsync(file.fileno())
     except BaseException:
-        temp.unlink(missing_ok=True)
+        _discard(temp)
         raise
     return temp
+
+
+def _discard(temp: Path) -> None:
+    # A cleanup error mustn't replace the write's own result or error
+    try:
+        temp.unlink(missing_ok=True)
+    except OSError:
+        log.warning("Couldn't remove the temp file %s", temp, exc_info=True)
 
 
 def _publish_no_clobber(src: Path, dst: Path) -> bool:

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.13.0 - Unreleased
+
+- (py) Added `sivkit.storage.fs`: name checks (`names`), file operations (`ops`) and async `apply` (`changes`); see `docs/adr/102`. (ts) Added `checkPortableName`, `checkPortablePath`, `canonicalKey`.
+- (py) `BlobStore` refuses empty paths and symlinks below its root. (ts) `toUriFriendlyFileName` appends `_` to Windows reserved names.
+
 ## 0.12.1 - 2026-10-09
 
 - (py/ts) UPDATE deltas remove fields present only in the reverse component; `null` remains an explicit value. Composition preserves this distinction.

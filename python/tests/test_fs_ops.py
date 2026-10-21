@@ -245,6 +245,9 @@ def test_check_new_path_polices_only_new_names(tmp_path):
     assert refusal(tmp_path, f"new {nfd}.html") == "not_nfc"
     assert refusal(tmp_path, "new./a.html") == "trailing"
     assert refusal(tmp_path, "aux.html", source=f"{nfd}.html") == "reserved"
+    # A moved file keeps its name, but not as a folder
+    assert refusal(tmp_path, f"new/{nfd}.html", source=f"{nfd}.html") is None
+    assert refusal(tmp_path, f"new/{nfd}.html/x", source=f"{nfd}.html") == "not_nfc"
     assert refusal(tmp_path, "x" * 300) == "part_length"
     assert refusal(tmp_path, "/".join(["d" * 200] * 6)) == "path_length"
     assert refusal(tmp_path, "/".join(["d"] * 40)) == "depth"
