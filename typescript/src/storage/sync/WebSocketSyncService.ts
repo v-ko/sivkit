@@ -50,6 +50,7 @@ export interface WebSocketSyncServiceConfig {
     url: string;
     /** Optional sub-protocols to pass to the WebSocket constructor. */
     protocols?: string[];
+    onDisconnected?: () => void;
 }
 
 interface PendingAck {
@@ -69,6 +70,7 @@ export class WebSocketSyncService extends StoreSyncServiceBase {
     private _role: WebSocketSyncServiceRole;
     private _url: string;
     private _protocols: string[] | undefined;
+    private _onDisconnected: (() => void) | undefined;
     private _seq: number = 0;
     private _pendingAcks: Map<number, PendingAck> = new Map();
 
@@ -77,6 +79,7 @@ export class WebSocketSyncService extends StoreSyncServiceBase {
         this._role = config.role;
         this._url = config.url;
         this._protocols = config.protocols;
+        this._onDisconnected = config.onDisconnected;
     }
 
     /**
@@ -135,6 +138,7 @@ export class WebSocketSyncService extends StoreSyncServiceBase {
                     reject(new WebSocketClosedError(event.code, event.reason));
                 }
                 this._rejectPendingAcks('Connection closed');
+                this._onDisconnected?.();
             };
         });
     }

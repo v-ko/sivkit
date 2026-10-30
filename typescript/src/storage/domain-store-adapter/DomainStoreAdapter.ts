@@ -13,6 +13,14 @@ export interface DomainStoreAdapter {
     applyDelta(deltaData: DeltaData): Promise<void>;
 }
 
+/** Save failure with ownership metadata; backend state carries persistent errors. */
+export class DomainSaveError extends Error {
+    constructor(message: string, public readonly reported = false) {
+        super(message);
+        this.name = 'DomainSaveError';
+    }
+}
+
 export type DomainStoreAdapterNames = "RestApi";
 
 export interface DomainStoreAdapterArgs {

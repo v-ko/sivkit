@@ -1,7 +1,7 @@
 import type { DeltaData } from "../../model/Delta";
 import type { SerializedEntityData } from "../../model/Entity";
 import { buildRestApiAuthHeaders, RestApiAuthConfig } from "../rest-api/Auth";
-import type { DomainStoreAdapter } from "./DomainStoreAdapter";
+import { DomainSaveError, type DomainStoreAdapter } from "./DomainStoreAdapter";
 
 /**
  * Domain store adapter that talks to a backend REST API.
@@ -58,8 +58,13 @@ export class RestApiDomainStoreAdapter implements DomainStoreAdapter {
             headers: { ...this._headers(), 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
-        if (!response.ok) {
-            throw new Error(`Failed to apply delta (${response.status} ${response.statusText})`);
-        }
+        if (response.ok) return;
+        const payload = await response.json().catch(() => null);
+        const detail = payload?.detail;
+        throw new DomainSaveError(
+            typeof detail === 'string' ? detail
+                : detail?.message ?? `Failed to apply delta (${response.status} ${response.statusText})`,
+            detail?.reported === true,
+        );
     }
 }

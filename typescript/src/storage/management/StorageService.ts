@@ -9,6 +9,7 @@ import { addChannel, Channel, getChannel, Subscription } from '../../registries/
 import { CommitData } from '../version-control/Commit';
 import { CommitGraphData } from '../version-control/CommitGraph';
 import { squashBranchHistory } from './sync-utils';
+import { DomainSaveError } from '../domain-store-adapter/DomainStoreAdapter';
 
 let log = getLogger('StorageService')
 
@@ -80,6 +81,15 @@ export interface StorageServiceInterface {
 export interface CommitOperationResult {
     type: 'commit';
     commit: CommitData;
+    domainSaveResult?: DomainSaveResult;
+}
+
+/** Domain-store save outcome after a repository commit has already been accepted. */
+export interface DomainSaveResult {
+    ok: boolean;
+    message?: string;
+    /** The backend recorded this failure in its synchronized state. */
+    reported?: boolean;
 }
 
 export interface LocalStorageUpdateMessage {
@@ -357,11 +367,23 @@ export class StorageService implements StorageServiceInterface {
         // PSM's syncDeltaToDomainStore is a no-op when no domain store is configured.
         // For commits originating from external FS changes (pulled by PSM's poll loop),
         // this writes back the same data — the backend PFM detects no diff and it's a no-op.
-        await repoManager.syncDeltaToDomainStore(commit.data().delta_data);
+        let domainSaveResult: DomainSaveResult | undefined;
+        try {
+            await repoManager.syncDeltaToDomainStore(commit.data().delta_data);
+            if (repoManager.config.domainStore) domainSaveResult = { ok: true };
+        } catch (error) {
+            // The repository commit already exists even if its disk request fails.
+            domainSaveResult = {
+                ok: false,
+                message: error instanceof Error ? error.message : String(error),
+                reported: error instanceof DomainSaveError && error.reported,
+            };
+        }
 
         return {
             type: 'commit',
             commit: commit.data(),
+            domainSaveResult,
         };
     }
 
